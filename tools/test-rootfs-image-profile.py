@@ -61,6 +61,16 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertNotIn("adb", script)
         self.assertNotIn("import-connectivity-state.sh", script)
 
+    def test_profile_and_rootfs_audit_report_named_metadata_failures(self):
+        project = TOOLS.parent
+        profile = (project / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
+        audit = (project / "tools/audit-rootfs.sh").read_text(encoding="utf-8")
+        self.assertIn("X810 device-support package is missing usr/share/tab-companion/port.json", profile)
+        self.assertIn("Arch port.json was not installed from x810-device-support", profile)
+        self.assertIn('audit_check "Arch Tab Companion port metadata is present"', audit)
+        self.assertIn('audit_check "dualboot extension metadata is present"', audit)
+        self.assertIn('audit_fail "$label"', audit)
+
     def test_installer_fetches_a_public_release_and_supports_offline_cache(self):
         installer = (TOOLS / "x810-install").read_text(encoding="utf-8")
         self.assertIn('REPOSITORY = "iamSlightlyWind/x810-btwdroid"', installer)

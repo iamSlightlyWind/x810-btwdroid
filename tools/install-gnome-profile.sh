@@ -31,6 +31,10 @@ shopt -u nullglob
 device_package="${device_packages[0]}"
 [[ -f "$device_package" && ! -L "$device_package" && -s "$device_package" ]] \
     || die "X810 device-support package is not a non-empty regular file: $device_package"
+device_files="$(tar --zstd -tf "$device_package")" \
+    || die "could not list local X810 device-support package contents"
+grep -Fxq 'usr/share/tab-companion/port.json' <<< "$device_files" \
+    || die "X810 device-support package is missing usr/share/tab-companion/port.json"
 (( ${#app_packages[@]} == 1 )) \
     || die "expected exactly one local tab-companion *-any.pkg.tar.zst under $packages_dir; run tools/build-packages.sh and remove stale duplicates"
 app_package="${app_packages[0]}"
@@ -121,6 +125,10 @@ desktop_packages=(
     "/work/packages/$(basename -- "$device_package")" \
     "/work/packages/$app_name" \
     "/work/packages/$(basename -- "$brave_package")"
+[[ -s "$rootfs/usr/share/tab-companion/port.json" ]] \
+    || die "Arch port.json was not installed from x810-device-support"
+[[ -s "$rootfs/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json" ]] \
+    || die "Arch dualboot extension metadata was not installed"
 
 # Keep the image to the shell/session/settings core, not standalone
 # applications selected by the broad `gnome` group. This also cleans up an
