@@ -198,7 +198,7 @@ chmod 0644 "$rootfs/etc/windstation-arch-profile"
 
 # The installer image is not a package cache. Drop downloaded package archives
 # and sync databases after the final transaction; the installed pacman DB stays.
-"$script_dir/pacman-target.sh" --builder-mode -Scc --noconfirm
+printf 'y\ny\n' | "$script_dir/pacman-target.sh" --builder-mode -Scc
 
 "$script_dir/audit-rootfs.sh"
 

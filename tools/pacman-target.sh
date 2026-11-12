@@ -55,7 +55,7 @@ if ((builder_mode)); then
     volume_args+=(--volume "$builder_conf_file:/work/pacman-builder.conf:ro")
 fi
 podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
-  run --rm --security-opt label=disable \
+  run --interactive --rm --security-opt label=disable \
   "${volume_args[@]}" --workdir /work \
   "$image" -lc '
     set -euo pipefail

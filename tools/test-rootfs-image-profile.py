@@ -151,8 +151,9 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn("-name alarm", audit)
         profile = (TOOLS / "install-gnome-profile.sh").read_text(encoding="utf-8")
         self.assertIn('"$script_dir/scrub-rootfs-private-state.sh"', profile)
-        self.assertIn('pacman-target.sh" --builder-mode -Scc --noconfirm', profile)
-        self.assertLess(profile.index('--builder-mode -Scc --noconfirm'), profile.index('"$script_dir/audit-rootfs.sh"'))
+        self.assertIn("printf 'y\\ny\\n' |", profile)
+        self.assertIn('pacman-target.sh" --builder-mode -Scc', profile)
+        self.assertLess(profile.index('--builder-mode -Scc'), profile.index('"$script_dir/audit-rootfs.sh"'))
         self.assertIn("Private SSH or Wi-Fi credential path remains in target rootfs", audit)
         self.assertIn('audit_check "downloaded pacman package archives are absent" no_cached_packages', audit)
         scrub = (TOOLS / "scrub-rootfs-private-state.sh").read_text(encoding="utf-8")
@@ -247,6 +248,7 @@ class RootfsImageProfileTests(unittest.TestCase):
 
     def test_builder_mode_never_disables_the_syscall_sandbox(self):
         pacman_target = (TOOLS / "pacman-target.sh").read_text(encoding="utf-8")
+        self.assertIn('run --interactive --rm', pacman_target)
         self.assertNotIn("DisableSandboxSyscalls", pacman_target)
         self.assertIn("DisableSandboxFilesystem", pacman_target)
         self.assertIn("--builder-config", pacman_target)
