@@ -22,6 +22,7 @@ class ArchWorkflowTests(unittest.TestCase):
     def test_job_graph_matches_fedora_pipeline_with_kernel_resolution_adaptation(self):
         expected = (
             "publication_identity",
+            "build_packages",
             "build_port_update",
             "plan",
             "prepare_kernel_modules",
@@ -43,29 +44,44 @@ class ArchWorkflowTests(unittest.TestCase):
         )
         self.assertEqual(
             ["prepare_kernel_modules" if job == "build_kernel" else job for job in fedora_jobs],
-            list(expected),
+            [job for job in expected if job != "build_packages"],
         )
+        self.assertIn("build_packages:\n    needs: publication_identity", self.text)
+        self.assertIn("build_port_update:\n    needs: build_packages", self.text)
         self.assertNotIn("pull_request:", self.text)
 
-    def test_port_update_job_tests_builds_and_hands_off_all_arch_package_outputs(self):
-        update = self.text.split("  build_port_update:\n", 1)[1].split("  plan:\n", 1)[0]
+    def test_package_job_builds_and_hands_off_native_arch_packages(self):
+        packages = self.text.split("  build_packages:\n", 1)[1].split("  build_port_update:\n", 1)[0]
         for command in (
             "tools/test-x810-install.py",
             "tools/test-arch-port-release.py",
             "tools/build-packages.sh",
-            "tools/make-arch-port-update-bundle.py",
             "filename//:/_",
             "name: x810-arch-packages",
-            "name: x810-port-update",
+            "port-build.json",
         ):
-            self.assertIn(command, update)
-        self.assertIn("BUILD_RUN_ID", update)
-        self.assertIn("write-arch-port-build-info.py", update)
+            self.assertIn(command, packages)
+        self.assertIn("BUILD_RUN_ID", packages)
+        self.assertIn("write-arch-port-build-info.py", packages)
+
+    def test_update_bundle_is_separate_and_does_not_gate_rootfs_jobs(self):
+        update = self.text.split("  build_port_update:\n", 1)[1].split("  plan:\n", 1)[0]
+        resolve = self.text.split("  resolve_rootfs:\n", 1)[1].split("  build_rootfs:\n", 1)[0]
+        build = self.text.split("  build_rootfs:\n", 1)[1].split("  publish_full_set:\n", 1)[0]
+        self.assertIn("tools/make-arch-port-update-bundle.py", update)
+        self.assertIn("name: x810-port-update", update)
+        self.assertNotIn("tools/build-packages.sh", update)
+        self.assertIn("needs: [plan, build_packages, prepare_kernel_modules]", self.text)
+        self.assertIn("needs.build_packages.result == 'success'", resolve)
+        self.assertIn("name: x810-arch-packages", resolve)
+        self.assertIn("needs: [plan, build_packages, prepare_kernel_modules, resolve_rootfs]", self.text)
+        self.assertIn("needs.build_packages.result == 'success'", build)
+        self.assertNotIn("build_port_update", resolve)
+        self.assertNotIn("build_port_update", build)
 
     def test_rootfs_build_consumes_the_exact_prebuilt_package_and_kernel_artifacts(self):
         resolve = self.text.split("  resolve_rootfs:\n", 1)[1].split("  build_rootfs:\n", 1)[0]
         build = self.text.split("  build_rootfs:\n", 1)[1].split("  publish_full_set:\n", 1)[0]
-        self.assertIn("needs: [plan, build_port_update, prepare_kernel_modules]", self.text)
         self.assertIn("name: x810-arch-packages", resolve)
         self.assertIn("name: x810-arch-kernel-modules", resolve)
         self.assertIn("name: x810-arch-packages", build)

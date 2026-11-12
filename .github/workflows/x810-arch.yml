@@ -74,10 +74,10 @@ jobs:
             echo "branch=$branch"
           } >> "$GITHUB_OUTPUT"
 
-  # Like Fedora's build_port_update job, package/update output is built and
-  # tested independently of the rootfs planning and image build. The exact
-  # native package artifacts are handed to the rootfs job.
-  build_port_update:
+  # The rootfs consumes these exact native packages. Keep package creation
+  # separate from the updater bundle so rootfs resolution/build do not wait
+  # for the unrelated updater assembly stage.
+  build_packages:
     needs: publication_identity
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -137,12 +137,12 @@ jobs:
           python3 tools/write-arch-port-build-info.py packages/x810-device-support/files/usr/share/tab-companion/port-build.json "$port_version" "$BUILD_RUN_ID" "$BUILD_RUN_NUMBER" "$BUILD_COMMIT" "$BUILD_BRANCH"
           echo "PORT_VERSION=$port_version" >> "$GITHUB_ENV"
 
-      - name: Build the Arch support packages and updater bundle
+      - name: Build the Arch support packages
         run: |
           set -euo pipefail
           tools/build-builder-image.sh
           tools/build-packages.sh
-          mkdir -p _ci/packages _ci/update
+          mkdir -p _ci/packages
           package_count="$(find out/packages -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)"
           [[ "$package_count" -eq 3 ]] || { echo "Expected exactly three Arch packages, found $package_count." >&2; exit 1; }
           for name in x810-device-support tab-companion brave-bin; do
@@ -155,8 +155,7 @@ jobs:
             cp -- "$package" "_ci/packages/${filename//:/_}"
           done
           (cd _ci/packages && sha256sum ./*.pkg.tar.zst > SHA256SUMS)
-          support_package="$(find _ci/packages -maxdepth 1 -type f -name 'x810-device-support-*.pkg.tar.zst' -print -quit)"
-          python3 tools/make-arch-port-update-bundle.py --package "$support_package" --build-info packages/x810-device-support/files/usr/share/tab-companion/port-build.json --output _ci/update/update.zip
+          cp -- packages/x810-device-support/files/usr/share/tab-companion/port-build.json _ci/packages/port-build.json
 
       - name: Hand native package archives to the rootfs job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
@@ -166,6 +165,37 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+
+  # This mirrors Fedora's independently running in-OS update component. It
+  # consumes the package artifact but has no dependency edge back to rootfs.
+  build_port_update:
+    needs: build_packages
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out updater bundler
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the verified support package and build identity
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
+        with:
+          name: x810-arch-packages
+          path: _ci/packages
+
+      - name: Build the Tab Companion updater bundle
+        run: |
+          set -euo pipefail
+          (cd _ci/packages && sha256sum --check SHA256SUMS)
+          support_package="$(find _ci/packages -maxdepth 1 -type f -name 'x810-device-support-*.pkg.tar.zst' -print -quit)"
+          [[ -n "$support_package" && -s _ci/packages/port-build.json ]]
+          mkdir -p _ci/update
+          python3 tools/make-arch-port-update-bundle.py \
+            --package "$support_package" \
+            --build-info _ci/packages/port-build.json \
+            --output _ci/update/update.zip
 
       - name: Hand the updater ZIP to the aggregate release job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
@@ -297,10 +327,10 @@ jobs:
           compression-level: 0
 
   resolve_rootfs:
-    needs: [plan, build_port_update, prepare_kernel_modules]
+    needs: [plan, build_packages, prepare_kernel_modules]
     if: >-
       always() && needs.plan.result == 'success' &&
-      needs.build_port_update.result == 'success' &&
+      needs.build_packages.result == 'success' &&
       needs.prepare_kernel_modules.result == 'success'
     runs-on: ubuntu-24.04
     outputs:
@@ -369,10 +399,10 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   build_rootfs:
-    needs: [plan, build_port_update, prepare_kernel_modules, resolve_rootfs]
+    needs: [plan, build_packages, prepare_kernel_modules, resolve_rootfs]
     if: >-
       always() && needs.plan.result == 'success' &&
-      needs.build_port_update.result == 'success' &&
+      needs.build_packages.result == 'success' &&
       needs.prepare_kernel_modules.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
       needs.resolve_rootfs.outputs.build_rootfs == 'true'
@@ -446,9 +476,10 @@ jobs:
           compression-level: 0
 
   publish_full_set:
-    needs: [plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs]
+    needs: [plan, build_packages, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs]
     if: >-
       always() && needs.plan.result == 'success' &&
+      needs.build_packages.result == 'success' &&
       needs.build_port_update.result == 'success' &&
       needs.prepare_kernel_modules.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
@@ -496,7 +527,7 @@ jobs:
         run: bash tools/publish-arch-full-set.sh
 
   prune_old_releases:
-    needs: [publication_identity, plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs, publish_full_set]
+    needs: [publication_identity, plan, build_packages, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs, publish_full_set]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
