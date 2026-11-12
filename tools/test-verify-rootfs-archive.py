@@ -41,6 +41,7 @@ class ArchiveFixture:
                  plaintext_shadow: bool = False,
                  omit_display_manager_alias: bool = False,
                  omit_graphical_display_manager_wants: bool = False,
+                 os_release_symlink: bool = False,
                  optional_app: str | None = None,
                  arch_dualboot_backend: bool = True,
                  private_credentials: bool | str = False) -> None:
@@ -49,6 +50,7 @@ class ArchiveFixture:
         self.plaintext_shadow = plaintext_shadow
         self.omit_display_manager_alias = omit_display_manager_alias
         self.omit_graphical_display_manager_wants = omit_graphical_display_manager_wants
+        self.os_release_symlink = os_release_symlink
         self.optional_app = optional_app
         self.arch_dualboot_backend = arch_dualboot_backend
         self.private_credentials = private_credentials
@@ -115,7 +117,11 @@ class ArchiveFixture:
                 + b"[core]\n"
             )
             self.add_file(archive, "etc/pacman.conf", pacman_conf)
-            self.add_file(archive, "etc/os-release", b"ID=archarm\nPRETTY_NAME=Arch Linux ARM\n")
+            if self.os_release_symlink:
+                self.add_link(archive, "etc/os-release", "../usr/lib/os-release")
+                self.add_file(archive, "usr/lib/os-release", b"ID=archarm\nPRETTY_NAME=Arch Linux ARM\n")
+            else:
+                self.add_file(archive, "etc/os-release", b"ID=archarm\nPRETTY_NAME=Arch Linux ARM\n")
             self.add_file(archive, "etc/sudoers.d/40-windstation", b"%wheel ALL=(ALL:ALL) ALL\n", mode=0o440)
             self.add_file(archive, "etc/ssh/sshd_config.d/90-windstation.conf",
                           b"PasswordAuthentication yes\nPermitRootLogin no\n")
@@ -204,6 +210,10 @@ class VerifyRootfsArchiveIntegrationTests(unittest.TestCase):
         result = self.run_verifier(ArchiveFixture())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Tab Companion dualboot", result.stdout)
+
+    def test_accepts_standard_usr_lib_os_release_symlink(self):
+        result = self.run_verifier(ArchiveFixture(os_release_symlink=True))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_release_publisher_can_require_the_embedded_port_build_identity(self):
         result = self.run_verifier(

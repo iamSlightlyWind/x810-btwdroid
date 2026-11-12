@@ -188,7 +188,7 @@ def verify_archive(path: pathlib.Path,
                 link_target = ""
                 if member.issym():
                     link_target = resolved_link_target(normalized, member.linkname)
-                    if normalized in REQUIRED_SYMLINK_TARGETS:
+                    if normalized in REQUIRED_SYMLINK_TARGETS or normalized == "etc/os-release":
                         symlinks[normalized] = link_target
                 seen[normalized] = (member.uid, member.gid, stat.S_IMODE(member.mode),
                                     member.isfile() or member.isdir(), link_target)
@@ -229,6 +229,7 @@ def verify_archive(path: pathlib.Path,
                         package_versions[name] = package_version_from_desc(desc)
                 if member.isfile() and normalized in {
                     "etc/pacman.conf", "etc/shadow", "etc/passwd", "etc/os-release",
+                    "usr/lib/os-release",
                     "etc/bluetooth/main.conf", "etc/sudoers.d/40-windstation",
                     "etc/ssh/sshd_config.d/90-windstation.conf",
                     "usr/lib/systemd/system/graphical.target",
@@ -242,6 +243,15 @@ def verify_archive(path: pathlib.Path,
         decompressor.stdout.close()
     if decompressor.wait() != 0:
         raise ValueError("zstd decompression failed")
+
+    # Arch commonly exposes /etc/os-release as a symlink into /usr/lib.
+    # Validate the link target and read the regular target member in-stream.
+    if "etc/os-release" not in captured:
+        if symlinks.get("etc/os-release") != "usr/lib/os-release":
+            raise ValueError("archive lacks a regular etc/os-release or its standard usr/lib symlink")
+        if "usr/lib/os-release" not in captured:
+            raise ValueError("etc/os-release symlink target is missing from archive")
+        captured["etc/os-release"] = captured["usr/lib/os-release"]
 
     missing = REQUIRED_PROFILE_PACKAGES - package_records
     if missing:
