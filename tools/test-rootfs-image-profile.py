@@ -23,9 +23,19 @@ SPEC.loader.exec_module(verifier)
 class RootfsImageProfileTests(unittest.TestCase):
     def test_fedora_style_python_installer_and_internal_build_orchestration(self):
         project = TOOLS.parent
-        self.assertTrue((project / "tools/x810-install").read_text(encoding="utf-8").startswith("#!/usr/bin/env python3"))
+        installer = project / "tools/x810-install"
+        self.assertTrue(installer.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3"))
+        self.assertTrue(os.access(installer, os.X_OK))
         self.assertFalse((project / "x810-build").exists())
-        script = (project / "rootfs/build-rootfs.sh").read_text(encoding="utf-8")
+        build_script = project / "rootfs/build-rootfs.sh"
+        self.assertTrue(os.access(build_script, os.X_OK))
+        for helper in (
+            "tools/configure-ssh-rootfs.sh",
+            "tools/audit-rootfs.sh",
+            "tools/package-rootfs.sh",
+        ):
+            self.assertTrue(os.access(project / helper, os.X_OK), f"{helper} must be executable")
+        script = build_script.read_text(encoding="utf-8")
         steps = (
             "tools/fetch-alarm-rootfs.py",
             "tools/build-builder-image.sh",
