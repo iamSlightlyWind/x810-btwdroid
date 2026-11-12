@@ -199,14 +199,8 @@ EOF
 chmod 0644 "$rootfs/etc/windstation-arch-profile"
 
 # Package hooks can create or expose home trees after first-boot provisioning.
-# Scrub all accounts again at the end, regardless of username/depth.
-for home_root in "$rootfs/home" "$rootfs/root"; do
-    if [[ -d "$home_root" ]]; then
-        find "$home_root" -mindepth 1 -name '.ssh*' -prune \
-            -exec rm -rf -- {} + \
-            || die "could not remove SSH material under $home_root"
-    fi
-done
+# Scrub again using PRoot's fake-root view of the target tree.
+"$script_dir/scrub-rootfs-ssh.sh"
 
 "$script_dir/audit-rootfs.sh"
 

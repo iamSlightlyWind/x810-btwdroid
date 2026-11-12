@@ -32,6 +32,7 @@ class RootfsImageProfileTests(unittest.TestCase):
         for helper in (
             "tools/configure-ssh-rootfs.sh",
             "tools/audit-rootfs.sh",
+            "tools/scrub-rootfs-ssh.sh",
             "tools/package-rootfs.sh",
         ):
             self.assertTrue(os.access(project / helper, os.X_OK), f"{helper} must be executable")
@@ -143,10 +144,15 @@ class RootfsImageProfileTests(unittest.TestCase):
             self.assertIn(marker, configure)
         self.assertIn("No private Wi-Fi, SSH, account, or Tailscale state", configure)
         self.assertIn(r"-name .ssh\*", audit)
+        self.assertIn('target /usr/bin/find /home /root -mindepth 1 -name .ssh\\*', configure)
+        self.assertIn('target /usr/bin/find /home /root -mindepth 1 -name .ssh\\*', audit)
         self.assertIn("-name alarm", audit)
         profile = (TOOLS / "install-gnome-profile.sh").read_text(encoding="utf-8")
-        self.assertIn("find \"$home_root\" -mindepth 1 -name '.ssh*'", profile)
+        self.assertIn('"$script_dir/scrub-rootfs-ssh.sh"', profile)
         self.assertIn("Unexpected SSH material remains in the public image", audit)
+        scrub = (TOOLS / "scrub-rootfs-ssh.sh").read_text(encoding="utf-8")
+        self.assertIn('target /usr/bin/find /home /root -mindepth 1 -name ".ssh*"', scrub)
+        self.assertIn("Unexpected SSH material remains in target home", scrub)
 
     def test_pacman_policy_disables_only_filesystem_sandbox(self):
         text = "[options]\nDisableSandboxFilesystem\n#DisableSandboxSyscalls\n[core]\n"
@@ -249,6 +255,13 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertNotIn("'", inner_script)
         self.assertIn('target() { "${proot[@]}" "$@"; }', inner_script)
         self.assertIn("target /usr/bin/ssh-keygen -A", inner_script)
+
+    def test_ssh_scrub_container_script_does_not_break_outer_single_quote(self):
+        scrub = (TOOLS / "scrub-rootfs-ssh.sh").read_text(encoding="utf-8")
+        marker = '"$image" -lc \'\n'
+        self.assertIn(marker, scrub)
+        inner_script = scrub.split(marker, 1)[1].rsplit("\n  '\n", 1)[0]
+        self.assertNotIn("'", inner_script)
 
     def test_builder_failure_leaves_target_pacman_conf_unchanged(self):
         with tempfile.TemporaryDirectory() as temporary:

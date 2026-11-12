@@ -74,17 +74,10 @@ EOF
       -exec rm -rf -- {} + 2>/dev/null || true
     rm -f "$rootfs/etc/wpa_supplicant/wpa_supplicant.conf"
     rm -rf "$rootfs/var/lib/tailscale"
-    # Remove SSH state for every account and every depth, not just the stock
-    # ALARM home. The public installer image is always a clean seed.
-    for home_root in "$rootfs/home" "$rootfs/root"; do
-      if [[ -d "$home_root" ]]; then
-        find "$home_root" -mindepth 1 -name .ssh\* -prune \
-          -exec rm -rf -- {} + || {
-            echo "could not remove SSH material under $home_root" >&2
-            exit 1
-          }
-      fi
-    done
+    # Use the PRoot fake-root view: the bootstrap /home/alarm mode 0700 is not
+    # traversable by the rootless host runner. Scrub every account/depth.
+    target /usr/bin/find /home /root -mindepth 1 -name .ssh\* -prune \
+      -exec /usr/bin/rm -rf -- {} +
     rm -f "$rootfs"/home/alarm/.bash_history "$rootfs"/root/.bash_history
 
     # NetworkManager owns networking on the installed system. Disable the
