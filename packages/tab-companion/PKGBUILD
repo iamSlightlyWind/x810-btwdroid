@@ -2,7 +2,7 @@
 # Windstation image package wrapper around Tab Companion's existing Arch source.
 pkgname=tab-companion
 pkgver=1.4.2
-pkgrel=4
+pkgrel=5
 pkgdesc='Samsung Galaxy tablet S Pen, keyboard and hardware companion'
 arch=('any')
 url='https://github.com/iamSlightlyWind/tab-companion'
@@ -22,7 +22,7 @@ depends=(
 )
 makedepends=('git')
 source=(
-  "tab-companion::git+https://github.com/iamSlightlyWind/tab-companion.git#commit=c8a9cd09a498530bfe736eb586125c91bef340f5"
+  "tab-companion::git+https://github.com/iamSlightlyWind/tab-companion.git#commit=e454709ac8c510a03a659d667e553b2c835a9d8c"
 )
 sha256sums=('SKIP')
 
@@ -30,7 +30,7 @@ build() {
   cd "$srcdir/tab-companion"
   APP_BUILD_RUN_ID=0 \
     APP_BUILD_RUN_NUMBER=0 \
-    APP_BUILD_HEAD_SHA=c8a9cd09a498530bfe736eb586125c91bef340f5 \
+    APP_BUILD_HEAD_SHA=e454709ac8c510a03a659d667e553b2c835a9d8c \
     APP_BUILD_BRANCH=windstation-image \
     bash ports/fedora-x810/tools/build-tab-companion-x810-bundle.sh
 }

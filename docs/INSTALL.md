@@ -1,15 +1,16 @@
-# Rootfs-only installer
+# Installer and build checks
 
-`tools/x810-install` installs an audited Arch rootfs from TWRP onto the
-existing `linuxroot` partition. It does not repartition the tablet or write
-Android, boot, recovery, or firmware partitions. It does not reboot.
+`tools/x810-install` is the Python host installer. It fetches the latest
+verified GitHub rootfs release (or uses the local cache with `--no-update`),
+validates the device in TWRP, formats only `linuxroot`, provisions a fresh
+account, verifies the extracted tree, and stops without rebooting.
 
-## Host checks
+## Tests
 
 Run from the repository root:
 
 ```sh
-bash -n tools/*.sh tools/x810-install x810-build
+bash -n tools/*.sh rootfs/*.sh
 python3 -m compileall -q tools
 python3 tools/test-x810-install.py
 python3 tools/test-target-pacman-policy.py
@@ -18,22 +19,18 @@ python3 tools/test-verify-rootfs-archive.py
 python3 tools/test-tab-companion-overlay.py
 ```
 
-## Recovery checks
+## Recovery
 
-With the intended tablet already in TWRP and attached by USB:
+With the tablet already in TWRP:
 
 ```sh
-tools/x810-install doctor
-tools/x810-install install --plan-only
+python3 tools/x810-install doctor
+python3 tools/x810-install install --plan-only
 ```
 
-These commands are read-only. Review device identity, the `linuxroot` target,
-rootfs profile, archive SHA-256, and backup summary. Only after review, run
-`tools/x810-install install` to replace `linuxroot`. The installer requires
-fresh account details and exact typed confirmations, verifies the written
-filesystem, and stops in TWRP.
+These do not write tablet partitions. The normal install requires a new
+account identity/password and two exact confirmations. It writes no Android,
+GPT, boot, recovery, vbmeta, or firmware partition, and never reboots.
 
-The installer accepts only an audited, checksummed artifact under
-`out/private-rootfs/`. See [ROOTFS-ARTIFACT.md](ROOTFS-ARTIFACT.md) for its
-contents and handling requirements. These artifacts are private local build
-outputs and must not be published.
+The public rootfs build is `rootfs/build-rootfs.sh`; release publication uses
+the same script in GitHub Actions. See [ROOTFS-ARTIFACT.md](ROOTFS-ARTIFACT.md).

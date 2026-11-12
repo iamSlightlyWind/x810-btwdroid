@@ -6,6 +6,8 @@ from __future__ import annotations
 import importlib.machinery
 import importlib.util
 import io
+import hashlib
+import json
 import sys
 import shlex
 import subprocess
@@ -58,7 +60,8 @@ class InstallerTests(unittest.TestCase):
         with patch.object(sys, "argv", [str(SCRIPT), "install", "--plan-only"]), \
              patch.object(sys, "stdin", io.StringIO("")), \
              patch.object(sys, "stdout", io.StringIO()), \
-             patch.object(installer, "validate_install_bundle", return_value=bundle), \
+             patch.object(installer, "latest_release", return_value={"tag_name": "x810-arch-build-1"}), \
+             patch.object(installer, "download_release_install_set", return_value=bundle), \
              patch.object(installer, "run_install", return_value=0) as run_install:
             self.assertEqual(installer.main(), 0)
         run_install.assert_called_once_with(SCRIPT.resolve().parents[1], bundle, None, True)
@@ -304,25 +307,22 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(shell_syntax.returncode, 0, shell_syntax.stderr)
         self.assertEqual(password_file, "alice:$6$hash\n")
         self.assertIn('userdel "$SEED"', script)
-        self.assertIn("useradd --no-create-home --uid 1000 --user-group", script)
+        self.assertIn("useradd --create-home --uid 1000 --user-group", script)
         self.assertIn("--comment \"$FULL\" \"$NEW\"", script)
         self.assertIn("AllowUsers $NEW", script)
-        self.assertIn('"$NEW ALL=(ALL:ALL) NOPASSWD: ALL"', script)
-        self.assertIn('cp "$ROOT/home/$SEED/.ssh/authorized_keys" "$KEYFILE"', script)
-        self.assertIn('cp -R "$ROOT/etc/skel/." "$ROOT/home/$NEW/"', script)
+        self.assertIn("%wheel ALL=(ALL:ALL) ALL", script)
+        self.assertNotIn("authorized_keys", script)
+        self.assertNotIn("NOPASSWD", script)
         self.assertNotIn("<<EOF", script)
         self.assertIn('chroot "$ROOT" /usr/bin/userdel "$SEED"', script)
         self.assertIn('rm -rf "$ROOT/home/$SEED"', script)
         self.assertIn('chroot "$ROOT" /usr/bin/passwd --lock root', script)
-        self.assertIn('mount -o bind /dev "$ROOT/dev"', script)
-        self.assertIn('umount "$ROOT/dev"', script)
-        self.assertIn('trap cleanup_provision EXIT', script)
         self.assertIn('chmod 0644 "$ROOT/etc/hosts"', script)
         self.assertNotIn("usermod --login", script)
         self.assertNotIn("existing slightlywind", script.lower())
         self.assertNotIn("new-secret", repr(client.pushed))
         self.assertIn(("rm", "-f", "/tmp/x810-arch-provision.sh",
-                       "/tmp/x810-arch-password-hash", "/tmp/x810-arch-authorized-keys"),
+                       "/tmp/x810-arch-password-hash"),
                       client.shell_calls)
 
     def test_install_provisioning_rejects_invalid_account_identity_before_adb(self):
@@ -332,12 +332,33 @@ class InstallerTests(unittest.TestCase):
                                                "Alice", "tablet", "$6$hash")
         self.assertEqual(client.pushed, {})
 
-    def test_bundle_paths_cannot_escape_private_artifact_directory(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            project = Path(tmp)
-            (project / "out/private-rootfs").mkdir(parents=True)
-            with self.assertRaisesRegex(ValueError, "unsafe path"):
-                installer.safe_artifact_path(project, "out/private-rootfs/../../outside.tar.zst")
+    def test_release_manifest_is_checked_against_github_asset_digest(self):
+        tag = "x810-arch-build-123"
+        archive_hash = "a" * 64
+        manifest = {
+            "schema_version": 1,
+            "type": installer.RELEASE_TYPE,
+            "release_tag": tag,
+            "device": {"model": installer.EXPECTED_MODEL, "codename": "gts9pwifi"},
+            "os": {"id": "archarm", "arch": "aarch64"},
+            "kernel_release": installer.EXPECTED_KERNEL_RELEASE,
+            "rootfs": {"archive": "rootfs.tar.zst", "size_bytes": 2048, "sha256": archive_hash},
+        }
+        payload = json.dumps(manifest).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        release = {"tag_name": tag, "assets": [
+            {"name": "manifest.json", "size": len(payload), "digest": f"sha256:{digest}",
+             "browser_download_url": "https://github.com/example/release/manifest.json"},
+            {"name": "rootfs.tar.zst", "size": 2048, "digest": f"sha256:{archive_hash}",
+             "browser_download_url": "https://github.com/example/release/rootfs.tar.zst"},
+        ]}
+        verified, assets = installer._release_manifest(release, opener=lambda *_args, **_kwargs: io.BytesIO(payload))
+        self.assertEqual(verified, manifest)
+        self.assertIn("rootfs.tar.zst", assets)
+
+        release["assets"][0]["digest"] = "sha256:" + "0" * 64
+        with self.assertRaisesRegex(ValueError, "GitHub's asset digest"):
+            installer._release_manifest(release, opener=lambda *_args, **_kwargs: io.BytesIO(payload))
 
     def test_install_source_never_issues_partition_or_reboot_commands(self):
         source = SCRIPT.read_text(encoding="utf-8")

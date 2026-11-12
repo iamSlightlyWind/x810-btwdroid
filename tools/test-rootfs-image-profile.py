@@ -21,25 +21,42 @@ SPEC.loader.exec_module(verifier)
 
 
 class RootfsImageProfileTests(unittest.TestCase):
-    def test_root_entrypoint_orchestrates_local_build_without_device_writes(self):
-        script = (TOOLS.parent / "x810-build").read_text(encoding="utf-8")
+    def test_fedora_style_python_installer_and_internal_build_orchestration(self):
+        project = TOOLS.parent
+        self.assertTrue((project / "tools/x810-install").read_text(encoding="utf-8").startswith("#!/usr/bin/env python3"))
+        self.assertFalse((project / "x810-build").exists())
+        script = (project / "rootfs/build-rootfs.sh").read_text(encoding="utf-8")
         steps = (
+            "tools/fetch-alarm-rootfs.py",
             "tools/build-builder-image.sh",
+            "tools/verify-alarm-rootfs.sh",
             "tools/prepare-rootfs.sh",
+            "tools/fetch-x810-kernel.py",
             "tools/upgrade-rootfs.sh",
             "tools/stage-x810-modules.sh",
             "tools/stage-x810-wifi.sh",
-            "tools/import-connectivity-state.sh",
             "tools/configure-ssh-rootfs.sh",
             "tools/build-packages.sh",
             "tools/install-gnome-profile.sh",
+            "tools/package-rootfs.sh",
+            "tools/make-rootfs-release.py",
         )
         offsets = [script.index(step) for step in steps]
         self.assertEqual(offsets, sorted(offsets))
-        self.assertIn("networkmanager wpa_supplicant tailscale sudo zram-generator", script)
-        self.assertIn("Existing work/rootfs is reused and never deleted.", script)
-        self.assertNotIn("tools/x810-install", script)
+        self.assertIn("networkmanager wpa_supplicant openssh sudo zram-generator", script)
+        self.assertIn("work/rootfs already contains a staged tree", script)
+        self.assertIn("No build-time user, SSH key, Wi-Fi credential", script)
         self.assertNotIn("adb", script)
+        self.assertNotIn("import-connectivity-state.sh", script)
+
+    def test_installer_fetches_a_public_release_and_supports_offline_cache(self):
+        installer = (TOOLS / "x810-install").read_text(encoding="utf-8")
+        self.assertIn('REPOSITORY = "iamSlightlyWind/x810-btwdroid"', installer)
+        self.assertIn('RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"', installer)
+        self.assertIn("--no-update", installer)
+        self.assertIn("rootfs.tar.zst", installer)
+        self.assertIn("verify-rootfs-archive.py", installer)
+        self.assertIn("format only", installer.lower())
 
     def test_archive_requires_gnome_gdm_and_tab_companion_package_records(self):
         self.assertEqual(
@@ -47,6 +64,10 @@ class RootfsImageProfileTests(unittest.TestCase):
             {
                 "x810-device-support",
                 "zram-generator",
+                "networkmanager",
+                "wpa_supplicant",
+                "openssh",
+                "sudo",
                 "gdm",
                 "gnome-shell",
                 "gnome-session",
@@ -82,6 +103,16 @@ class RootfsImageProfileTests(unittest.TestCase):
             "usr/lib/systemd/system/gdm.service",
         )
 
+    def test_public_build_removes_bootstrap_credentials_before_archive(self):
+        configure = (TOOLS / "configure-ssh-rootfs.sh").read_text(encoding="utf-8")
+        audit = (TOOLS / "audit-rootfs.sh").read_text(encoding="utf-8")
+        for marker in ("/home/alarm/.ssh", "ssh_host_*_key", "system-connections",
+                       "wpa_supplicant.conf", "/var/lib/tailscale"):
+            self.assertIn(marker, configure)
+        self.assertIn("No private Wi-Fi, SSH, account, or Tailscale state", configure)
+        self.assertIn("*/.ssh*", audit)
+        self.assertIn("-name alarm", audit)
+
     def test_pacman_policy_disables_only_filesystem_sandbox(self):
         text = "[options]\nDisableSandboxFilesystem\n#DisableSandboxSyscalls\n[core]\n"
         self.assertEqual(verifier.parse_pacman_sandbox_options(text), (True, False))
@@ -96,16 +127,14 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertTrue(verifier.password_field_is_hash_or_locked("!"))
         self.assertTrue(verifier.password_field_is_hash_or_locked("$6$salt$digest"))
         self.assertFalse(verifier.password_field_is_hash_or_locked("plaintext-password"))
-        verifier.validate_shadow_data(
-            b"root:!:1:0:99999:7:::\nslightlywind:$6$salt$digest:1:0:99999:7:::\n"
-        )
+        verifier.validate_shadow_data(b"root:!:1:0:99999:7:::\nalarm:!:1:0:99999:7:::\n")
         with self.assertRaisesRegex(ValueError, "not a crypt hash"):
             verifier.validate_shadow_data(
-                b"root:!:1:0:99999:7:::\nslightlywind:plaintext-password:1:0:99999:7:::\n"
+                b"root:!:1:0:99999:7:::\nalarm:plaintext-password:1:0:99999:7:::\n"
             )
         with self.assertRaisesRegex(ValueError, "root password must remain locked"):
             verifier.validate_shadow_data(
-                b"root:$6$salt$digest:1:0:99999:7:::\nslightlywind:!:1:0:99999:7:::\n"
+                b"root:$6$salt$digest:1:0:99999:7:::\nalarm:!:1:0:99999:7:::\n"
             )
 
     def test_build_profile_uses_full_upgrade_and_enables_gdm_without_starting_it(self):
@@ -146,7 +175,7 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn('echo "Packages: X810 zram/thermal defaults', script)
         self.assertNotIn('echo "Packages: gnome group', script)
         self.assertNotIn(" gnome gdm ", script)
-        self.assertIn("The GNOME group is avoided", docs)
+        self.assertIn("group is avoided", docs)
         self.assertIn("gnome-console", docs)
         self.assertIn("gnome-boxes", docs)
         self.assertIn('rm -f "$pkgdir/usr/share/glib-2.0/schemas/gschemas.compiled"', pkgbuild)
@@ -158,7 +187,9 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn('"/work/packages/$app_name"', script)
         self.assertIn('systemctl --root="$rootfs" enable gdm.service', script)
         self.assertNotIn("systemctl --root=\"$rootfs\" start gdm", script)
-        self.assertIn('package-rootfs-private.sh', script)
+        builder = (TOOLS.parent / "rootfs/build-rootfs.sh").read_text(encoding="utf-8")
+        self.assertIn('tools/package-rootfs.sh', builder)
+        self.assertNotIn('package-rootfs-private.sh', script + builder)
         self.assertIn('configure-target-pacman.py" --check', script)
 
     def test_builder_mode_never_disables_the_syscall_sandbox(self):

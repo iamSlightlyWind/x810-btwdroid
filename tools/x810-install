@@ -22,10 +22,12 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 import unicodedata
 import uuid
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any, Callable
 
 
@@ -34,15 +36,19 @@ EXPECTED_TWRP_ALIAS = "SM-X816B"  # observed generic recovery property on this X
 EXPECTED_CODENAMES = {"gts9p", "gts9pwifi"}
 EXPECTED_BOOTLOADER_PREFIX = "X810"
 EXPECTED_KERNEL_RELEASE = "7.2.0-gts9wifi"
-ROOTFS_SEED_USERNAME = "slightlywind"
-ROOTFS_SEED_UID = 1000
+REPOSITORY = "iamSlightlyWind/x810-btwdroid"
+RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+RELEASE_CACHE = Path.home() / ".cache" / "x810-btwdroid" / "releases"
+RELEASE_TYPE = "x810-arch-release"
+INSTALLER_USER_AGENT = "x810-install/1"
+ALARM_SEED_USERNAME = "alarm"
+ALARM_SEED_UID = 1000
 LINUXROOT = "/dev/block/by-name/linuxroot"
 LINUXROOT_NODE = "/dev/block/sda35"
 LINUXROOT_PARTITION_NUMBER = 35
 LINUXROOT_LABEL = "linuxroot"
 LINUXROOT_TYPE_GUID = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 LINUXROOT_MIN_BYTES = 32 * 1024**3
-ROOTFS_ARTIFACT_LOCK = "ARCH-ROOTFS-ARTIFACT.lock"
 INSTALL_CONFIRMATION = "INSTALL ARCH ON SM-X810 AND ERASE LINUXROOT"
 FORMAT_CONFIRMATION = "FORMAT ONLY LINUXROOT ON SM-X810"
 INSTALL_MOUNT = "/tmp/x810-arch-linuxroot"
@@ -79,84 +85,217 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def parse_kv(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        key, separator, value = line.partition("=")
-        if not separator:
-            continue
-        if key in values:
-            raise ValueError(f"duplicate {key!r} in {path.name}:{number}")
-        values[key] = value
-    return values
-
-
-def safe_artifact_path(project: Path, raw: str) -> Path:
-    relative = PurePosixPath(raw)
-    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
-        raise ValueError("artifact lock contains an unsafe path")
-    out_dir = project / "out"
-    private_dir = out_dir / "private-rootfs"
-    if out_dir.is_symlink() or private_dir.is_symlink():
-        raise ValueError("rootfs artifact directory path must not use symlinks")
-    root = private_dir.resolve(strict=True)
-    candidate = project / Path(*relative.parts)
-    if candidate.is_symlink():
-        raise ValueError("rootfs artifact must not be a symlink")
-    path = candidate.resolve(strict=True)
+def latest_release(opener=urllib.request.urlopen) -> dict[str, Any]:
+    request = urllib.request.Request(RELEASE_API, headers={
+        "Accept": "application/vnd.github+json",
+        "User-Agent": INSTALLER_USER_AGENT,
+    })
     try:
-        path.relative_to(root)
-    except ValueError as error:
-        raise ValueError("rootfs artifact must be inside out/private-rootfs") from error
-    if path.is_symlink() or not path.is_file() or path.suffix != ".zst":
-        raise ValueError("rootfs artifact must be a regular .tar.zst file, not a symlink")
-    return path
+        with opener(request, timeout=30) as response:
+            payload = response.read(4 * 1024 * 1024 + 1)
+    except urllib.error.HTTPError as error:
+        raise ValueError(f"GitHub release lookup failed with HTTP {error.code}") from error
+    except (OSError, urllib.error.URLError, TimeoutError) as error:
+        raise ValueError(f"could not query the latest Arch release: {error}") from error
+    if len(payload) > 4 * 1024 * 1024:
+        raise ValueError("GitHub release metadata exceeds 4 MiB")
+    try:
+        release = json.loads(payload)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"GitHub returned invalid release metadata: {error}") from error
+    if not isinstance(release, dict):
+        raise ValueError("GitHub returned an unexpected release response")
+    return release
 
 
-def validate_install_bundle(project: Path, archive_override: Path | None = None,
-                            runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
-    """Verify the private artifact lock, sidecar, archive checksum and contents."""
-    lock_path = project / "docs" / ROOTFS_ARTIFACT_LOCK
-    if lock_path.is_symlink() or not lock_path.is_file():
-        raise ValueError(f"missing regular private artifact lock: {lock_path}")
-    lock = parse_kv(lock_path)
-    locked_archive = safe_artifact_path(project, lock.get("artifact", ""))
-    archive = locked_archive
-    if archive_override is not None:
-        if archive_override.is_symlink():
-            raise ValueError("refusing a symlinked archive path")
-        archive = archive_override.resolve(strict=True)
-        try:
-            archive.relative_to((project / "out" / "private-rootfs").resolve(strict=True))
-        except ValueError as error:
-            raise ValueError("--archive must select an artifact in out/private-rootfs") from error
-        if archive != locked_archive:
-            raise ValueError("--archive must match the artifact pinned by ARCH-ROOTFS-ARTIFACT.lock")
+def _asset_index(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    assets = release.get("assets")
+    if not isinstance(assets, list):
+        raise ValueError("latest Arch release has no assets")
+    result: dict[str, dict[str, Any]] = {}
+    for asset in assets:
+        if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
+            continue
+        if asset["name"] in result:
+            raise ValueError(f"duplicate GitHub release asset {asset['name']}")
+        result[asset["name"]] = asset
+    return result
 
-    digest = lock.get("sha256", "")
-    if not re.fullmatch(r"[0-9a-f]{64}", digest):
-        raise ValueError("artifact lock has no valid SHA-256")
-    sidecar = archive.with_name(archive.name + ".sha256")
-    if sidecar.is_symlink() or not sidecar.is_file():
-        raise ValueError("private archive SHA-256 sidecar is missing or unsafe")
-    match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._+-]+\.tar\.zst)\n?", sidecar.read_text(encoding="ascii"))
-    if not match or match.group(1) != digest or match.group(2) != archive.name:
-        raise ValueError("archive checksum sidecar does not match the artifact lock")
-    actual = sha256_file(archive)
-    if actual != digest:
-        raise ValueError("private rootfs SHA-256 mismatch")
-    locked_size = lock.get("size_bytes", "")
-    if locked_size and (not locked_size.isdecimal() or int(locked_size) != archive.stat().st_size):
-        raise ValueError("rootfs archive size does not match the artifact lock")
 
+def _release_manifest(release: dict[str, Any], opener=urllib.request.urlopen) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    tag = release.get("tag_name")
+    if not isinstance(tag, str) or not re.fullmatch(r"x810-arch-build-[0-9]+", tag):
+        raise ValueError("latest release is not a published X810 Arch build")
+    assets = _asset_index(release)
+    manifest_asset = assets.get("manifest.json")
+    if manifest_asset is None:
+        raise ValueError("latest Arch release has no manifest.json")
+    url = manifest_asset.get("browser_download_url")
+    size = manifest_asset.get("size")
+    api_digest = manifest_asset.get("digest")
+    if (not isinstance(url, str) or not url.startswith("https://github.com/")
+            or not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= 16 * 1024 * 1024):
+        raise ValueError("release manifest download metadata is invalid")
+    request = urllib.request.Request(url, headers={"User-Agent": INSTALLER_USER_AGENT})
+    try:
+        with opener(request, timeout=90) as response:
+            data = response.read(size + 1)
+    except (OSError, urllib.error.URLError, TimeoutError) as error:
+        raise ValueError(f"could not download release manifest: {error}") from error
+    if len(data) != size:
+        raise ValueError("downloaded release manifest has the wrong size")
+    digest = hashlib.sha256(data).hexdigest()
+    if isinstance(api_digest, str) and api_digest.startswith("sha256:") and digest != api_digest[7:]:
+        raise ValueError("downloaded manifest does not match GitHub's asset digest")
+    try:
+        manifest = json.loads(data)
+    except (UnicodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"release manifest is invalid JSON: {error}") from error
+    if (not isinstance(manifest, dict) or isinstance(manifest.get("schema_version"), bool)
+            or manifest.get("schema_version") != 1
+            or manifest.get("type") != RELEASE_TYPE
+            or manifest.get("release_tag") != tag
+            or manifest.get("device") != {"model": EXPECTED_MODEL, "codename": "gts9pwifi"}
+            or manifest.get("os") != {"id": "archarm", "arch": "aarch64"}
+            or manifest.get("kernel_release") != EXPECTED_KERNEL_RELEASE):
+        raise ValueError("release manifest is not for this X810 Arch build")
+    rootfs = manifest.get("rootfs")
+    if not isinstance(rootfs, dict) or rootfs.get("archive") != "rootfs.tar.zst":
+        raise ValueError("release manifest does not identify rootfs.tar.zst")
+    rootfs_size = rootfs.get("size_bytes")
+    rootfs_digest = rootfs.get("sha256")
+    if (not isinstance(rootfs_size, int) or isinstance(rootfs_size, bool) or rootfs_size <= 0
+            or not isinstance(rootfs_digest, str) or not re.fullmatch(r"[0-9a-f]{64}", rootfs_digest)):
+        raise ValueError("release manifest rootfs size or SHA-256 is invalid")
+    rootfs_asset = assets.get("rootfs.tar.zst")
+    rootfs_asset_size = rootfs_asset.get("size") if rootfs_asset else None
+    if (rootfs_asset is None or not isinstance(rootfs_asset_size, int)
+            or isinstance(rootfs_asset_size, bool) or rootfs_asset_size != rootfs_size
+            or rootfs_asset.get("digest") not in (None, f"sha256:{rootfs_digest}")
+            or not isinstance(rootfs_asset.get("browser_download_url"), str)
+            or not rootfs_asset["browser_download_url"].startswith("https://github.com/")):
+        raise ValueError("rootfs asset metadata disagrees with the release manifest")
+    return manifest, assets
+
+
+def _download_release_asset(asset: dict[str, Any], digest: str, size: int,
+                            destination: Path, opener=urllib.request.urlopen) -> Path:
+    if destination.is_symlink():
+        raise ValueError(f"refusing symlinked release cache file: {destination}")
+    destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    destination.parent.chmod(0o700)
+    if destination.is_file() and destination.stat().st_size == size and sha256_file(destination) == digest:
+        return destination
+    temp = destination.with_name(f".{destination.name}.partial-{os.getpid()}")
+    if temp.exists() or temp.is_symlink():
+        temp.unlink()
+    request = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": INSTALLER_USER_AGENT})
+    hasher = hashlib.sha256()
+    count = 0
+    print(f"Downloading {destination.name} ({size:,} bytes)...", flush=True)
+    try:
+        with opener(request, timeout=120) as response, temp.open("xb") as output_file:
+            while True:
+                block = response.read(4 * 1024 * 1024)
+                if not block:
+                    break
+                count += len(block)
+                if count > size:
+                    raise ValueError(f"downloaded {destination.name} exceeds manifest size")
+                hasher.update(block)
+                output_file.write(block)
+        if count != size or hasher.hexdigest() != digest:
+            raise ValueError(f"downloaded {destination.name} failed size/SHA-256 verification")
+        os.chmod(temp, 0o600)
+        os.replace(temp, destination)
+    finally:
+        if temp.exists():
+            temp.unlink()
+    return destination
+
+
+def _verify_archive(project: Path, archive: Path, digest: str, size: int, version: str,
+                    runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
+    if archive.is_symlink() or not archive.is_file():
+        raise ValueError("release rootfs cache is missing or unsafe")
+    if archive.stat().st_size != size or sha256_file(archive) != digest:
+        raise ValueError("cached rootfs size/SHA-256 does not match its release manifest")
     verifier = project / "tools" / "verify-rootfs-archive.py"
     if verifier.is_symlink() or not verifier.is_file():
         raise ValueError("rootfs archive verifier is missing or unsafe")
     verified = runner([sys.executable, str(verifier), str(archive)], timeout=1800)
     if verified.returncode != 0:
         raise ValueError(f"rootfs content/metadata validation failed: {output(verified)}")
-    version = lock.get("created_utc", "local")
-    return InstallBundle(archive=archive, sha256=digest, size_bytes=archive.stat().st_size, version=version)
+    return InstallBundle(archive=archive, sha256=digest, size_bytes=size, version=version)
+
+
+def download_release_install_set(project: Path, release: dict[str, Any], opener=urllib.request.urlopen,
+                                 runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
+    manifest, assets = _release_manifest(release, opener)
+    tag = manifest["release_tag"]
+    key = hashlib.sha256(tag.encode("utf-8")).hexdigest()[:24]
+    cache = RELEASE_CACHE / key
+    if cache.is_symlink():
+        raise ValueError(f"release cache path must not be a symlink: {cache}")
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cache.chmod(0o700)
+    (cache / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    rootfs = manifest["rootfs"]
+    archive = _download_release_asset(
+        assets["rootfs.tar.zst"], rootfs["sha256"], rootfs["size_bytes"],
+        cache / "rootfs.tar.zst", opener,
+    )
+    (cache / "release.json").write_text(json.dumps({
+        "tag_name": tag, "published_at": release.get("published_at", ""),
+    }, indent=2) + "\n", encoding="utf-8")
+    return _verify_archive(project, archive, rootfs["sha256"], rootfs["size_bytes"], tag, runner)
+
+
+def find_cached_install_bundle(project: Path,
+                               runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
+    if RELEASE_CACHE.is_symlink() or not RELEASE_CACHE.is_dir():
+        raise ValueError("no cached X810 Arch release is available")
+    candidates: list[tuple[str, Path, dict[str, Any], dict[str, Any]]] = []
+    for cache in RELEASE_CACHE.iterdir():
+        if cache.is_symlink() or not cache.is_dir():
+            continue
+        try:
+            manifest = json.loads((cache / "manifest.json").read_text(encoding="utf-8"))
+            release = json.loads((cache / "release.json").read_text(encoding="utf-8"))
+            if not isinstance(manifest, dict) or not isinstance(release, dict):
+                continue
+            candidates.append((str(release.get("published_at", "")), cache, manifest, release))
+        except (OSError, json.JSONDecodeError):
+            continue
+    if not candidates:
+        raise ValueError("no verified cached X810 Arch release is available")
+    for _, cache, manifest, release in sorted(candidates, reverse=True, key=lambda item: item[0]):
+        try:
+            _validate_cached_manifest(manifest, release.get("tag_name"))
+            rootfs = manifest["rootfs"]
+            return _verify_archive(project, cache / "rootfs.tar.zst", rootfs["sha256"],
+                                   rootfs["size_bytes"], manifest["release_tag"], runner)
+        except (OSError, ValueError, KeyError):
+            continue
+    raise ValueError("cached X810 Arch releases were incomplete or failed verification")
+
+
+def _validate_cached_manifest(manifest: dict[str, Any], tag: Any) -> None:
+    if (isinstance(manifest.get("schema_version"), bool) or manifest.get("schema_version") != 1
+            or manifest.get("type") != RELEASE_TYPE
+            or manifest.get("release_tag") != tag
+            or manifest.get("device") != {"model": EXPECTED_MODEL, "codename": "gts9pwifi"}
+            or manifest.get("os") != {"id": "archarm", "arch": "aarch64"}
+            or manifest.get("kernel_release") != EXPECTED_KERNEL_RELEASE
+            or not isinstance(manifest.get("rootfs"), dict)):
+        raise ValueError("cached manifest is not a valid X810 Arch release")
+    rootfs = manifest["rootfs"]
+    if (rootfs.get("archive") != "rootfs.tar.zst"
+            or isinstance(rootfs.get("size_bytes"), bool)
+            or not isinstance(rootfs.get("size_bytes"), int) or rootfs["size_bytes"] <= 0
+            or not isinstance(rootfs.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", rootfs["sha256"])):
+        raise ValueError("cached manifest has invalid rootfs metadata")
 
 
 def adb_devices(adb_output: str) -> list[tuple[str, str]]:
@@ -510,7 +649,7 @@ def prompt_install_details(password_reader: Callable[[str], str] = getpass.getpa
 
 def provision_rootfs_account(client: ADBClient, mountpoint: str, username: str,
                              full_name: str, hostname: str, password_hash: str) -> None:
-    """Replace the image's build-time seed with the installer's fresh user."""
+    """Replace the generic ALARM seed with the installer-selected fresh user."""
     if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", username):
         raise ValueError("invalid username")
     if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", hostname):
@@ -521,118 +660,83 @@ def provision_rootfs_account(client: ADBClient, mountpoint: str, username: str,
     if not password_hash.startswith("$6$") or "\n" in password_hash:
         raise ValueError("invalid SHA-512-crypt password hash")
 
-    # The archive is a private build template and contains a temporary
-    # bootstrap account so it can be assembled/tested over SSH. A real install
-    # discards that account/home and creates the installer-selected account,
-    # just as the Fedora installer does. Preserve only its public SSH key so
-    # the pre-authorized remote-access path remains usable.
+    # The image is a pristine, credential-free Arch Linux ARM rootfs. Remove
+    # its generic UID-1000 `alarm` account on every install, then create the
+    # user entered in this run. No previous tablet account or SSH key is kept.
     remote_script = f"""#!/system/bin/sh
 set -eu
 umask 077
-TMPDIR=/tmp
-export TMPDIR
 ROOT={shlex.quote(mountpoint)}
-SEED={shlex.quote(ROOTFS_SEED_USERNAME)}
+SEED={shlex.quote(ALARM_SEED_USERNAME)}
 NEW={shlex.quote(username)}
 FULL={shlex.quote(full_name)}
 HOST={shlex.quote(hostname)}
 PASSFILE=/tmp/x810-arch-password-hash
-KEYFILE=/tmp/x810-arch-authorized-keys
-DEV_BOUND=0
-cleanup_provision() {{
-  if [ "$DEV_BOUND" = 1 ]; then umount "$ROOT/dev" >/dev/null 2>&1 || true; fi
-  rm -f "$KEYFILE"
-}}
-trap cleanup_provision EXIT
 test -f "$ROOT/etc/passwd"
 test -f "$ROOT/etc/group"
 test -f "$ROOT/etc/shadow"
 test -d "$ROOT/etc/ssh/sshd_config.d"
 test -d "$ROOT/etc/sudoers.d"
 test -d "$ROOT/etc/skel"
-test -d /tmp
-for utility in userdel useradd groupdel getent chpasswd passwd id stat sshd visudo; do
+test -s "$PASSFILE"
+for utility in userdel useradd groupdel getent chpasswd passwd id visudo; do
   test -x "$ROOT/usr/bin/$utility"
 done
 for group in wheel video audio input storage; do
   chroot "$ROOT" /usr/bin/getent group "$group" >/dev/null
 done
-test -f "$ROOT/home/$SEED/.ssh/authorized_keys"
-test -s "$PASSFILE"
-awk -F: -v user="$SEED" -v uid={ROOTFS_SEED_UID} -v home="/home/$SEED" \
+awk -F: -v user="$SEED" -v uid={ALARM_SEED_UID} -v home="/home/$SEED" \
   '$3 == uid {{ uid_count++ }} $1 == user && $3 == uid && $4 == uid && $6 == home {{ found++ }} \
    END {{ exit found != 1 || uid_count != 1 }}' "$ROOT/etc/passwd"
-awk -F: -v user="$SEED" -v gid={ROOTFS_SEED_UID} \
+awk -F: -v user="$SEED" -v gid={ALARM_SEED_UID} \
   '$3 == gid {{ gid_count++ }} $1 == user && $3 == gid {{ found++ }} \
    END {{ exit found != 1 || gid_count != 1 }}' "$ROOT/etc/group"
-# The requested name is a genuinely fresh account name; its only allowed
-# collision is the template account when the user explicitly chooses that name.
 if [ "$NEW" != "$SEED" ]; then
   if awk -F: -v user="$NEW" '$1 == user {{ found=1 }} END {{ exit !found }}' "$ROOT/etc/passwd"; then
-    echo 'X810_ACCOUNT: requested username already exists in the clean rootfs template' >&2
+    echo 'X810_ACCOUNT: requested username collides with an installed system account' >&2
     exit 21
   fi
   if awk -F: -v group="$NEW" '$1 == group {{ found=1 }} END {{ exit !found }}' "$ROOT/etc/group"; then
-    echo 'X810_ACCOUNT: requested username conflicts with an existing system group' >&2
+    echo 'X810_ACCOUNT: requested username conflicts with an installed system group' >&2
     exit 22
   fi
   if [ -e "$ROOT/home/$NEW" ]; then
-    echo 'X810_ACCOUNT: requested home directory already exists in the clean rootfs template' >&2
+    echo 'X810_ACCOUNT: requested home directory collides with an installed path' >&2
     exit 23
   fi
 fi
-
-cp "$ROOT/home/$SEED/.ssh/authorized_keys" "$KEYFILE"
-chmod 0600 "$KEYFILE"
-mkdir -p "$ROOT/dev"
-mount -o bind /dev "$ROOT/dev"
-DEV_BOUND=1
 chroot "$ROOT" /usr/bin/userdel "$SEED"
-# Delete the home explicitly after first preserving the key. This avoids the
-# harmless but noisy userdel -r warning when no mail spool exists in the image.
 rm -rf "$ROOT/home/$SEED"
-# userdel normally removes the seed private group as well. Remove it explicitly
-# if this shadow-utils build leaves it behind, so UID/GID 1000 can be reused.
 if chroot "$ROOT" /usr/bin/getent group "$SEED" >/dev/null 2>&1; then
   chroot "$ROOT" /usr/bin/groupdel "$SEED"
 fi
-chroot "$ROOT" /usr/bin/useradd --no-create-home --uid {ROOTFS_SEED_UID} --user-group \
+chroot "$ROOT" /usr/bin/useradd --create-home --uid {ALARM_SEED_UID} --user-group \
   --groups wheel,video,audio,input,storage --shell /bin/bash --comment "$FULL" "$NEW"
 chroot "$ROOT" /usr/bin/chpasswd --encrypted < "$PASSFILE"
 chroot "$ROOT" /usr/bin/passwd --lock root
-
-mkdir -p "$ROOT/home/$NEW"
-cp -R "$ROOT/etc/skel/." "$ROOT/home/$NEW/"
-mkdir -p "$ROOT/home/$NEW/.ssh"
-cp "$KEYFILE" "$ROOT/home/$NEW/.ssh/authorized_keys"
-chown -R {ROOTFS_SEED_UID}:{ROOTFS_SEED_UID} "$ROOT/home/$NEW"
-chmod 0700 "$ROOT/home/$NEW" "$ROOT/home/$NEW/.ssh"
-chmod 0600 "$ROOT/home/$NEW/.ssh/authorized_keys"
-rm -f "$KEYFILE"
-
-printf '%s\\n' 'PubkeyAuthentication yes' 'AuthenticationMethods publickey' \
-  'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
+chown -R {ALARM_SEED_UID}:{ALARM_SEED_UID} "$ROOT/home/$NEW"
+chmod 0750 "$ROOT/home/$NEW"
+printf '%s\\n' 'PasswordAuthentication yes' 'KbdInteractiveAuthentication no' \
   'PermitEmptyPasswords no' 'PermitRootLogin no' "AllowUsers $NEW" \
   > "$ROOT/etc/ssh/sshd_config.d/90-windstation.conf"
-printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\\n' "$NEW" > "$ROOT/etc/sudoers.d/40-windstation"
+printf '%%wheel ALL=(ALL:ALL) ALL\\n' > "$ROOT/etc/sudoers.d/40-windstation"
 chmod 0440 "$ROOT/etc/sudoers.d/40-windstation"
 printf '%s\\n' "$HOST" > "$ROOT/etc/hostname"
 chmod 0644 "$ROOT/etc/hostname"
-printf '%s\\n' "127.0.0.1 localhost.localdomain localhost $HOST" \
+printf '%s\\n' "127.0.0.1 localhost.localdomain localhost $HOST" \\
   '::1       localhost.localdomain localhost' > "$ROOT/etc/hosts"
 chmod 0644 "$ROOT/etc/hosts"
-
 account_ok=0
 while IFS=: read -r name passwd uid gid gecos home shell; do
-  if [ "$name" = "$NEW" ] && [ "$uid" = {ROOTFS_SEED_UID} ] && \
-     [ "$gid" = {ROOTFS_SEED_UID} ] && [ "$gecos" = "$FULL" ] && \
+  if [ "$name" = "$NEW" ] && [ "$uid" = {ALARM_SEED_UID} ] && \\
+     [ "$gid" = {ALARM_SEED_UID} ] && [ "$gecos" = "$FULL" ] && \\
      [ "$home" = "/home/$NEW" ] && [ "$shell" = /bin/bash ]; then
     account_ok=1
     break
   fi
 done < "$ROOT/etc/passwd"
-if [ "$account_ok" -ne 1 ] || [ ! -s "$ROOT/home/$NEW/.ssh/authorized_keys" ]; then
-  echo 'X810_VERIFY: fresh account, home, or preserved authorized key is missing/invalid' >&2
+if [ "$account_ok" -ne 1 ] || [ ! -d "$ROOT/home/$NEW" ]; then
+  echo 'X810_VERIFY: fresh account or home is missing/invalid' >&2
   exit 31
 fi
 groups=$(chroot "$ROOT" /usr/bin/id -Gn "$NEW")
@@ -640,13 +744,9 @@ for group in wheel video audio input storage; do
   case " $groups " in *" $group "*) ;; *) echo "X810_VERIFY: user lacks $group group" >&2; exit 32 ;; esac
 done
 grep -Fxq "AllowUsers $NEW" "$ROOT/etc/ssh/sshd_config.d/90-windstation.conf"
-grep -Fxq "$NEW ALL=(ALL:ALL) NOPASSWD: ALL" "$ROOT/etc/sudoers.d/40-windstation"
-chroot "$ROOT" /usr/bin/sshd -t -f /etc/ssh/sshd_config
-chroot "$ROOT" /usr/bin/visudo -c
+grep -Fxq '%wheel ALL=(ALL:ALL) ALL' "$ROOT/etc/sudoers.d/40-windstation"
 grep -Fxq "$HOST" "$ROOT/etc/hostname"
-test "$(chroot "$ROOT" /usr/bin/stat -c '%u:%g:%a' "/home/$NEW/.ssh/authorized_keys")" = "{ROOTFS_SEED_UID}:{ROOTFS_SEED_UID}:600"
-umount "$ROOT/dev"
-DEV_BOUND=0
+chroot "$ROOT" /usr/bin/visudo -c
 """
     with tempfile.TemporaryDirectory(prefix="x810-arch-provision-") as temporary:
         stage = Path(temporary)
@@ -656,7 +756,8 @@ DEV_BOUND=0
         secret.write_text(f"{username}:{password_hash}\n", encoding="ascii")
         os.chmod(script, 0o600)
         os.chmod(secret, 0o600)
-        for source, target in ((script, "/tmp/x810-arch-provision.sh"), (secret, "/tmp/x810-arch-password-hash")):
+        for source, target in ((script, "/tmp/x810-arch-provision.sh"),
+                               (secret, "/tmp/x810-arch-password-hash")):
             result = client.push(source, target)
             if result.returncode != 0:
                 raise RuntimeError(f"could not stage fresh-account provisioner in TWRP: {output(result)}")
@@ -668,9 +769,7 @@ DEV_BOUND=0
             if result.returncode != 0:
                 raise RuntimeError(output(result) or "could not create the fresh Arch login account")
         finally:
-            client.shell("rm", "-f", "/tmp/x810-arch-provision.sh", "/tmp/x810-arch-password-hash",
-                         "/tmp/x810-arch-authorized-keys")
-
+            client.shell("rm", "-f", "/tmp/x810-arch-provision.sh", "/tmp/x810-arch-password-hash")
 
 def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
     checks = (
@@ -881,28 +980,34 @@ def run_install(project: Path, bundle: InstallBundle, serial: str | None = None,
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Safely install the verified Arch GNOME/GDM rootfs to linuxroot from an already-open X810 TWRP session."
+        description="Fetch and safely install the latest verified X810 Arch GNOME/GDM release from an already-open TWRP session."
     )
     parser.add_argument("command", nargs="?", choices=("install", "doctor"), default="install",
-                        help="install the local rootfs (default), or perform read-only host/TWRP checks")
+                        help="install the latest GitHub release (default), or perform read-only host/TWRP checks")
     parser.add_argument("--serial", help="select this ADB serial if multiple devices are connected")
-    parser.add_argument("--archive", type=Path, help="select the artifact already pinned by ARCH-ROOTFS-ARTIFACT.lock")
+    parser.add_argument("--no-update", action="store_true",
+                        help="use the newest verified release already cached locally; do not query GitHub")
     parser.add_argument("--plan-only", action="store_true", help="verify target and show the plan; do not create backup or write tablet")
     args = parser.parse_args()
     project = Path(__file__).resolve().parents[1]
     if args.command == "doctor":
-        if args.archive is not None or args.plan_only:
-            parser.error("doctor does not accept --archive or --plan-only")
+        if args.no_update or args.plan_only:
+            parser.error("doctor does not accept --no-update or --plan-only")
         return run_doctor(args.serial)
     if not args.plan_only and not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("STOP: install requires an interactive terminal for hidden password entry and typed confirmations.", file=sys.stderr)
         return 2
     try:
-        bundle = validate_install_bundle(project, args.archive)
+        if args.no_update:
+            bundle = find_cached_install_bundle(project)
+            print(f"Verified cached GitHub release {bundle.version}; no network request was made.", flush=True)
+        else:
+            release = latest_release()
+            bundle = download_release_install_set(project, release)
+            print(f"Verified GitHub release {bundle.version}; SHA-256 {bundle.sha256}.", flush=True)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"INSTALL STOPPED: local rootfs verification failed: {error}", file=sys.stderr)
+        print(f"INSTALL STOPPED: release download/verification failed: {error}", file=sys.stderr)
         return 2
-    print(f"Verified local rootfs {bundle.archive.name}; SHA-256 {bundle.sha256}.", flush=True)
     return run_install(project, bundle, args.serial, args.plan_only)
 
 

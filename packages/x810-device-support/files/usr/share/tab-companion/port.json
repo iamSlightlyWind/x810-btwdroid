@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "port_id": "x810-arch",
+  "name": "Arch Linux ARM on Samsung Galaxy Tab S9+ Wi-Fi",
+  "repo_url": "https://github.com/iamSlightlyWind/x810-btwdroid",
+  "workflow_file": "x810-arch.yml",
+  "branch": "main",
+  "artifact_name": "rootfs",
+  "public_release": true,
+  "release_tag_prefix": "x810-arch-build",
+  "device_id": "SM-X810",
+  "os_id": "archarm",
+  "os_version": "rolling",
+  "arch": "aarch64",
+  "port_update": {
+    "backend": "pacman",
+    "available": false
+  },
+  "kernel_update": {
+    "backend": "pacman",
+    "available": false
+  },
+  "capabilities": {
+    "dualboot": true,
+    "kernel_update": false,
+    "port_update": false
+  }
+}

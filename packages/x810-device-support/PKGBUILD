@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 pkgname=x810-device-support
 pkgver=0.1.0
-pkgrel=2
+pkgrel=3
 pkgdesc='Conservative thermal and zram defaults for Samsung Galaxy Tab S9+ Wi-Fi (SM-X810)'
 arch=('any')
 url='https://github.com/iamSlightlyWind/x810-fedroid'
@@ -25,6 +25,8 @@ package() {
     "$pkgdir/etc/x810-power-profile-tuning.json"
   install -Dm0644 "$startdir/files/etc/systemd/zram-generator.conf.d/80-x810.conf" \
     "$pkgdir/etc/systemd/zram-generator.conf.d/80-x810.conf"
+  install -Dm0644 "$startdir/files/usr/share/tab-companion/port.json" \
+    "$pkgdir/usr/share/tab-companion/port.json"
   install -Dm0644 "$startdir/LICENSE" \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

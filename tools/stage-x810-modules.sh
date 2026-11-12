@@ -16,20 +16,15 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     set -euo pipefail
     project=/workspace/x810-btwdroid
     rootfs="$project/work/rootfs"
-    source="$project/cache/modules/7.2.0-gts9wifi"
+    source="$project/cache/public-kernel/usr/lib/modules/7.2.0-gts9wifi"
     release=7.2.0-gts9wifi
-    expected=0749d8578409f24a48fd01bcf73e0002dee949d8e354edc0ed4d17d542f9fecc
     [[ -d "$rootfs/etc" && -d "$source" ]]
 
-    tree_hash() {
-      ( cd "$1" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64 )
-    }
     module_hash() {
       ( cd "$1" && find . -type f -name "*.ko*" -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64 )
     }
-    actual="$(tree_hash "$source")"
-    [[ "$actual" == "$expected" ]] || {
-      echo "source module-tree digest mismatch: $actual (expected $expected)" >&2
+    [[ -s "$source/modules.dep" ]] || {
+      echo "public X810 kernel RPM has no modules.dep for $release" >&2
       exit 1
     }
 
@@ -45,7 +40,7 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
       echo "Matching module files already staged; refreshing depmod indexes"
     else
       cp -a -- "$source" "$destination"
-      echo "Copied exact active kernel module tree to $destination"
+      echo "Copied the pinned X810 release module tree to $destination"
     fi
 
     depmod -b "$rootfs" "$release"

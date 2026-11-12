@@ -21,23 +21,21 @@ root_arg="${1:-}"
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 project_dir="$(cd -- "$script_dir/.." && pwd -P)"
-workspace_dir="$(cd -- "$project_dir/.." && pwd -P)"
 rootfs="$(cd -- "$root_arg" && pwd -P)"
 case "$rootfs" in
     "$project_dir/work"/*|"$project_dir/tmp"/*) ;;
     *) die "rootfs must be a disposable tree below $project_dir/work or $project_dir/tmp (got $rootfs)" ;;
 esac
 
-x810_repo="$workspace_dir/x810-fedroid"
-bdftool="$x810_repo/tools/bdftool.py"
+bdftool="$script_dir/bdftool.py"
 bdftool_sha256="c2f851d7d9700fca7df41df19d291122877c6008e22722250f68fddbe72e4cc7"
-[[ -f "$bdftool" ]] || die "missing pinned x810-fedroid tool: $bdftool"
+[[ -f "$bdftool" ]] || die "missing vendored BDF parser: $bdftool"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v awk >/dev/null 2>&1 || die "awk is required"
 [[ "$(sha256sum -- "$bdftool" | awk '{print $1}')" == "$bdftool_sha256" ]] \
-    || die "x810-fedroid bdftool.py differs from the pinned version; review and update this script's pin"
+    || die "vendored bdftool.py differs from the pinned upstream version; review and update this script's pin"
 
 fw_rel="usr/lib/firmware/ath11k/WCN6855/hw2.1"
 fw_dir="$rootfs/$fw_rel"
@@ -157,7 +155,7 @@ else
 fi
 
 python3 "$bdftool" md5s "$board_input" > "$work/before.md5s" \
-    || die "x810-fedroid bdftool.py could not parse the target board-2.bin"
+    || die "vendored bdftool.py could not parse the target board-2.bin"
 slot_count="$(awk -v n="$slot" '$3 == n {c++} END {print c+0}' "$work/before.md5s")"
 [[ "$slot_count" == 1 ]] \
     || die "expected exactly one X810 board slot in board-2.bin; found $slot_count"
@@ -189,7 +187,7 @@ case "$slot_md5:$slot_sha256" in
             fetch_pinned "$bdf_ref_url" "$work/reference-board-2.bin" "$bdf_ref_sha256" \
                 "pinned public WCN6855 reference board-2.bin"
             python3 "$bdftool" md5s "$work/reference-board-2.bin" > "$work/reference.md5s" \
-                || die "x810-fedroid bdftool.py could not parse the pinned reference board-2.bin"
+                || die "vendored bdftool.py could not parse the pinned reference board-2.bin"
             ref_variant_count="$(awk -v n="$variant" '$3 == n {c++} END {print c+0}' "$work/reference.md5s")"
             [[ "$ref_variant_count" == 1 ]] \
                 || die "pinned BDF source must contain exactly one NTM_TW220 variant; found $ref_variant_count"
@@ -295,7 +293,7 @@ patched = data[:header_len] + b"".join(chunks) + data[offset:]
 open(output, "wb").write(patched)
 PY
         python3 "$bdftool" md5s "$board_src" > "$work/after.md5s" \
-            || die "x810-fedroid bdftool.py could not parse generated board-2.bin"
+            || die "vendored bdftool.py could not parse generated board-2.bin"
         python3 - "$work/before.md5s" "$work/after.md5s" "$slot" "$generic_md5" "$tuned_md5" <<'PY'
 import sys
 

@@ -37,6 +37,10 @@ class BrowserOverlayTests(unittest.TestCase):
         self.assertNotIn('rm -f "$pkgdir/usr/local/libexec/x810-boot-switch-core"', pkgbuild)
         self.assertNotIn('rm -rf "$pkgdir/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io"', pkgbuild)
         self.assertIn('chown -R root:root "$pkgdir"', pkgbuild)
+        port = json.loads((ROOT / "packages/x810-device-support/files/usr/share/tab-companion/port.json").read_text())
+        self.assertTrue(port["capabilities"]["dualboot"])
+        self.assertEqual(port["kernel_update"], {"backend": "pacman", "available": False})
+        self.assertEqual(port["port_update"], {"backend": "pacman", "available": False})
         for extension in (
             "dualboot@agcarbajo.github.io",
             "spen-dock@agcarbajo.github.io",

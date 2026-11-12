@@ -1,47 +1,38 @@
 # X810 BTWDroid
 
-Arch Linux ARM rootfs preparation and rootfs-only installer for the Samsung
-Galaxy Tab S9+ Wi-Fi (SM-X810 / `gts9pwifi`). It reuses the device's existing
-kernel and boot chain; the installer targets only the existing
-`PARTLABEL=linuxroot` filesystem and stops in recovery without rebooting.
+Arch Linux ARM GNOME rootfs and guarded installer for the Samsung Galaxy Tab
+S9+ Wi-Fi (SM-X810, `gts9pwifi`). The installer replaces only the existing
+`linuxroot` filesystem; Android, boot partitions, GPT, and recovery are not
+written, and it does not reboot.
 
-## Build the GNOME profile
+## Install
 
-From the repository root, restore the local-only inputs described in
-[`docs/PORT-PLAN.md`](docs/PORT-PLAN.md), then run the single entry point:
+With the tablet already in TWRP and attached to a Linux host:
 
 ```sh
-./x810-build
+python3 tools/x810-install doctor
+python3 tools/x810-install install --plan-only
+python3 tools/x810-install install
 ```
 
-It prepares the staged rootfs if needed, builds the local packages, applies
-the GNOME profile, audits it, and creates a private archive. Existing
-`work/rootfs` is reused but never deleted. The script does not install
-packages on the build host or access Windstation.
+The Python installer fetches the latest GitHub release, verifies its manifest,
+checksum, and rootfs contents, then prompts for a new account and explicit
+format confirmation. `--no-update` selects an already cached release.
 
-The profile provides the X810 zram/thermal defaults, GNOME Shell, GDM,
-Settings, GNOME Terminal, Brave, Bluetooth utilities, and Tab Companion.
-Tab Companion includes browser RAM limits and the Arch-aware dualboot page.
-Boot-image sets are not part of the
-rootfs build, so switching is unavailable until valid Android and Linux sets
-are staged under `/var/lib/x810-boot-sets`.
+## Build and test
 
-## Validate and install
+The Fedora-style layout keeps the public installer in `tools/` and the
+internal build orchestration in `rootfs/`:
 
-Run the contract tests with the commands in [`docs/INSTALL.md`](docs/INSTALL.md).
-For a connected tablet in TWRP, `tools/x810-install doctor` and
-`tools/x810-install install --plan-only` perform read-only checks. A normal
-`install` erases and replaces only `linuxroot`, provisions a fresh account,
-verifies the result, and stops in TWRP. Review the target, checksum, and typed
-confirmation prompts before proceeding.
+```sh
+rootfs/build-rootfs.sh
+```
 
-GitHub Actions runs source, installer, profile, and archive-verifier tests.
-A manual workflow can build the AArch64 packages; it does not build or publish
-the private rootfs or access the tablet.
+It stages a fresh tree in `work/rootfs`, builds and audits the minimal GNOME /
+GDM profile, then prepares `out/rootfs.tar.zst` and its release manifest.
+GitHub Actions runs the same build and publishes the release. The build does
+not access Windstation. See [docs/INSTALL.md](docs/INSTALL.md) for local tests.
 
-## Local-only build state
-
-`cache/`, `work/`, `out/`, `tmp/`, `gnupg/`, and `references/` are ignored.
-The staged rootfs and private archive contain SSH keys, network credentials,
-Tailscale state, and account data. Keep them local; do not commit or upload
-them.
+The image includes GNOME Settings, GNOME Terminal, Brave, Bluetooth, and Tab
+Companion. No build-time user, SSH key, Wi-Fi credentials, or Tailscale state
+is part of the public rootfs.

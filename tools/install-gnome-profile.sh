@@ -191,11 +191,10 @@ EOF
 chmod 0644 "$rootfs/etc/windstation-arch-profile"
 
 "$script_dir/audit-rootfs.sh"
-"$script_dir/package-rootfs-private.sh" "$rootfs" windstation-arch-gnome-rootfs
 
-echo "Built GNOME/GDM Arch profile in the local rootfs and archived it privately."
+echo "Built and audited the GNOME/GDM Arch profile in the staged rootfs."
 echo "Packages: X810 zram/thermal defaults, minimal GNOME Shell/session/GDM/Settings, GNOME Terminal, Brave, BlueZ utilities, required fonts/audio and Tab Companion dependencies; no GNOME app group."
 echo "Default target: graphical.target; gdm.service and bluetooth.service are enabled (not started during the build)."
 echo "Pacman: filesystem sandbox disabled for the X810 kernel; syscall sandbox remains enabled."
-echo "The installer will prompt for a fresh user's full name, username, hostname, and password; the slightlywind build-time SSH bootstrap is discarded at install."
+echo "The public image contains no human account or private SSH/network state; the installer creates a fresh account."
 echo "Windstation was not accessed, rebooted, or written."

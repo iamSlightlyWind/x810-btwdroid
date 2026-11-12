@@ -1,12 +1,13 @@
-name: X810 BTWDroid CI and package build
+name: X810 Arch build and release
 
 on:
   push:
     branches: [main]
     paths:
+      - "PORT_VERSION"
       - "README.md"
       - "LICENSE"
-      - "x810-build"
+      - "rootfs/**"
       - "docs/**"
       - "packages/**"
       - "tools/**"
@@ -14,9 +15,10 @@ on:
       - ".github/workflows/x810-arch.yml"
   pull_request:
     paths:
+      - "PORT_VERSION"
       - "README.md"
       - "LICENSE"
-      - "x810-build"
+      - "rootfs/**"
       - "docs/**"
       - "packages/**"
       - "tools/**"
@@ -28,8 +30,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: x810-btwdroid-${{ github.ref }}
-  cancel-in-progress: true
+  group: x810-arch-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   test:
@@ -40,35 +42,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install archive test tool
+      - name: Install archive verification tools
         run: |
           sudo apt-get update
           sudo apt-get install --yes zstd
 
-      - name: Verify local secrets and build outputs stay ignored
+      - name: Run installer, rootfs and package contract tests
         run: |
           set -euo pipefail
-          for path in \
-            cache/ssh-authorized_keys \
-            cache/windstation-connectivity.tar.gz \
-            gnupg/private-keys-v1.d/example.key \
-            references/local-checkout \
-            work/rootfs/etc/shadow \
-            out/private-rootfs/rootfs.tar.zst \
-            out/packages/tab-companion-any.pkg.tar.zst \
-            docs/ARCH-ROOTFS-ARTIFACT.lock \
-            x810-install-backup-test/manifest.json \
-            tmp/ssh-known-hosts; do
-            git check-ignore -q "$path" || {
-              echo "Missing .gitignore coverage for: $path" >&2
-              exit 1
-            }
-          done
-
-      - name: Run installer, rootfs and package contracts
-        run: |
-          set -euo pipefail
-          bash -n tools/*.sh tools/x810-install x810-build
+          bash -n tools/*.sh rootfs/*.sh
           python3 -m compileall -q tools
           python3 tools/test-x810-install.py
           python3 tools/test-target-pacman-policy.py
@@ -76,54 +58,46 @@ jobs:
           python3 tools/test-verify-rootfs-archive.py
           python3 tools/test-tab-companion-overlay.py
 
-  build_packages:
+  build_release:
     needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 360
+    permissions:
+      contents: write
     env:
-      # Older Podman versions reject a runroot longer than 50 characters;
-      # the checkout path under /home/runner/work exceeds that limit.
-      PODMAN_RUNROOT_OVERRIDE: /tmp/x810-btwdroid-podman-run
+      # Keep Podman runroot below old vfs-driver path limits; rootfs/build-rootfs.sh
+      # also defaults to the short ignored paths under this repository's tmp/.
+      PODMAN_RUNROOT_OVERRIDE: /tmp/x810-btwdroid-run
+      X810_RELEASE_TAG: x810-arch-build-${{ github.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install Podman
+      - name: Install build tools
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes podman
+          sudo apt-get install --yes podman zstd gnupg cpio rpm
+          command -v rpm2cpio
 
-      - name: Build AArch64 package artifacts
+      - name: Build and audit the complete Arch GNOME rootfs
+        run: rootfs/build-rootfs.sh
+
+      - name: Publish one verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tools/build-builder-image.sh
-          tools/build-packages.sh
-
-      - name: Prepare artifact-safe package filenames
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          packages=(out/packages/*.pkg.tar.zst)
-          [[ ${#packages[@]} -eq 3 ]] || {
-            echo "Expected three package archives, found ${#packages[@]}" >&2
-            exit 1
-          }
-          mkdir -p out/package-artifact
-          for package in "${packages[@]}"; do
-            filename="${package##*/}"
-            # GitHub artifact paths reject ':'; pacman package filenames may
-            # contain it for an epoch (Brave uses epoch 1). Rename only the
-            # downloadable copy; package archive contents remain unchanged.
-            cp -- "$package" "out/package-artifact/${filename//:/_}"
-          done
-
-      - name: Upload packages for local rootfs staging
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: x810-btwdroid-packages
-          path: out/package-artifact/*.pkg.tar.zst
-          if-no-files-found: error
-          retention-days: 3
-          compression-level: 0
+          test -s out/rootfs.tar.zst
+          test -s out/manifest.json
+          test -s out/SHA256SUMS
+          (cd out && sha256sum --check SHA256SUMS)
+          gh release create "$X810_RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Windstation Arch rootfs build $GITHUB_RUN_NUMBER" \
+            --notes "Verified Arch Linux ARM GNOME/GDM rootfs for SM-X810. Built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. The installer downloads this release and verifies manifest.json before formatting linuxroot. No Android or boot partition is written." \
+            --latest \
+            out/rootfs.tar.zst out/manifest.json out/SHA256SUMS
