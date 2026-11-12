@@ -74,10 +74,9 @@ jobs:
             echo "branch=$branch"
           } >> "$GITHUB_OUTPUT"
 
-  # The rootfs consumes these exact native packages. Keep package creation
-  # separate from the updater bundle so rootfs resolution/build do not wait
-  # for the unrelated updater assembly stage.
-  build_packages:
+  # Like Fedora, this component job builds the in-OS update package and ZIP.
+  # The rootfs builds its own package copies inside build_rootfs.
+  build_port_update:
     needs: publication_identity
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -142,7 +141,7 @@ jobs:
           set -euo pipefail
           tools/build-builder-image.sh
           tools/build-packages.sh
-          mkdir -p _ci/packages
+          mkdir -p _ci/packages _ci/update
           package_count="$(find out/packages -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)"
           [[ "$package_count" -eq 3 ]] || { echo "Expected exactly three Arch packages, found $package_count." >&2; exit 1; }
           for name in x810-device-support tab-companion brave-bin; do
@@ -156,35 +155,6 @@ jobs:
           done
           (cd _ci/packages && sha256sum ./*.pkg.tar.zst > SHA256SUMS)
           cp -- packages/x810-device-support/files/usr/share/tab-companion/port-build.json _ci/packages/port-build.json
-
-      - name: Hand native package archives to the rootfs job
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
-        with:
-          name: x810-arch-packages
-          path: _ci/packages/
-          if-no-files-found: error
-          retention-days: 1
-          compression-level: 0
-
-  # This mirrors Fedora's independently running in-OS update component. It
-  # consumes the package artifact but has no dependency edge back to rootfs.
-  build_port_update:
-    needs: build_packages
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Check out updater bundler
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Download the verified support package and build identity
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
-        with:
-          name: x810-arch-packages
-          path: _ci/packages
-
       - name: Build the Tab Companion updater bundle
         run: |
           set -euo pipefail
@@ -327,10 +297,9 @@ jobs:
           compression-level: 0
 
   resolve_rootfs:
-    needs: [plan, build_packages, prepare_kernel_modules]
+    needs: [plan, prepare_kernel_modules]
     if: >-
       always() && needs.plan.result == 'success' &&
-      needs.build_packages.result == 'success' &&
       needs.prepare_kernel_modules.result == 'success'
     runs-on: ubuntu-24.04
     outputs:
@@ -342,12 +311,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - name: Download the independently built Arch package artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
-        with:
-          name: x810-arch-packages
-          path: _ci/packages
 
       - name: Download the verified X810 kernel module artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
@@ -362,9 +325,7 @@ jobs:
           SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
         run: |
           set -euo pipefail
-          (cd _ci/packages && sha256sum --check SHA256SUMS)
           (cd _ci/kernel && sha256sum --check SHA256SUMS)
-          [[ "$(find _ci/packages -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)" -eq 3 ]]
           python3 - _ci/kernel/kernel.json <<'PY'
           import json
           import re
@@ -382,10 +343,11 @@ jobs:
           if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("modules", {}).get("sha256", ""))):
               raise SystemExit("kernel module digest is missing from the receipt")
           PY
-          package_digest="$(cd _ci/packages && sha256sum ./*.pkg.tar.zst | sha256sum | awk '{print $1}')"
           kernel_receipt_digest="$(sha256sum _ci/kernel/kernel.json | awk '{print $1}')"
           bootstrap_lock_digest="$(sha256sum docs/ALARM-ROOTFS.lock | awk '{print $1}')"
-          rootfs_key="$(printf '%s\n%s\n%s\n%s\n' "$SOURCE_COMMIT" "$package_digest" "$kernel_receipt_digest" "$bootstrap_lock_digest" | sha256sum | awk '{print $1}')"
+          # The immutable source commit covers package recipes and pinned source
+          # revisions; the rootfs job independently builds those packages.
+          rootfs_key="$(printf '%s\n%s\n%s\n' "$SOURCE_COMMIT" "$kernel_receipt_digest" "$bootstrap_lock_digest" | sha256sum | awk '{print $1}')"
           [[ "$rootfs_key" =~ ^[0-9a-f]{64}$ ]]
           echo "rootfs_key=$rootfs_key" >> "$GITHUB_OUTPUT"
           echo "rootfs_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
@@ -393,16 +355,15 @@ jobs:
           kernel_tag="$(python3 -c 'import json; print(json.load(open("_ci/kernel/kernel.json", encoding="utf-8"))["release_tag"])')"
           {
             echo "### Resolved Arch rootfs inputs"
-            echo "- Rootfs key: `$rootfs_key` (source, package archives, kernel receipt and signed bootstrap lock; rolling repository transaction is intentionally not claimed reproducible)."
+            echo "- Rootfs key: `$rootfs_key` (source commit including package recipes, kernel receipt and signed bootstrap lock; rolling repository transaction is intentionally not claimed reproducible)."
             echo "- Rootfs action: **build** `$RELEASE_TAG`."
             echo "- Matching X810 kernel modules: `$kernel_tag`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   build_rootfs:
-    needs: [plan, build_packages, prepare_kernel_modules, resolve_rootfs]
+    needs: [plan, prepare_kernel_modules, resolve_rootfs]
     if: >-
       always() && needs.plan.result == 'success' &&
-      needs.build_packages.result == 'success' &&
       needs.prepare_kernel_modules.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
       needs.resolve_rootfs.outputs.build_rootfs == 'true'
@@ -413,7 +374,6 @@ jobs:
       PODMAN_RUNROOT_OVERRIDE: /tmp/x810-arch-rootfs-run
       X810_RELEASE_TAG: ${{ needs.resolve_rootfs.outputs.rootfs_tag }}
       X810_BUILD_INPUTS_KEY: ${{ needs.resolve_rootfs.outputs.rootfs_key }}
-      X810_PREBUILT_PACKAGES: "1"
       X810_PREBUILT_KERNEL_MODULES: "1"
     steps:
       - name: Check out rootfs sources
@@ -428,29 +388,33 @@ jobs:
           sudo apt-get install --yes podman zstd gnupg cpio rpm
           command -v rpm2cpio
 
-      - name: Download verified Arch package artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
-        with:
-          name: x810-arch-packages
-          path: _ci/packages
-
       - name: Download the exact X810 kernel module artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
         with:
           name: x810-arch-kernel-modules
           path: _ci/kernel
 
-      - name: Verify and stage upstream build artifacts
+      - name: Verify and stage the exact upstream kernel-module artifact
         run: |
           set -euo pipefail
-          (cd _ci/packages && sha256sum --check SHA256SUMS)
           (cd _ci/kernel && sha256sum --check SHA256SUMS)
-          mkdir -p out/packages cache/public-kernel/usr/lib/modules
-          cp -- _ci/packages/*.pkg.tar.zst out/packages/
-          cp -- _ci/packages/SHA256SUMS out/packages/SHA256SUMS
+          mkdir -p cache/public-kernel/usr/lib/modules
           cp -- _ci/kernel/kernel.json cache/public-kernel/kernel.json
           tar -xzf _ci/kernel/modules.tar.gz -C cache/public-kernel/usr/lib/modules
           python3 tools/fetch-x810-kernel.py --verify-prepared
+
+      - name: Stage publication identity for the rootfs package build
+        env:
+          PORT_VERSION: ${{ needs.plan.outputs.port_version }}
+          BUILD_RUN_ID: ${{ needs.plan.outputs.publication_run_id }}
+          BUILD_RUN_NUMBER: ${{ needs.plan.outputs.publication_run_number }}
+          BUILD_COMMIT: ${{ needs.plan.outputs.source_commit }}
+          BUILD_BRANCH: ${{ needs.plan.outputs.branch }}
+        run: |
+          set -euo pipefail
+          python3 tools/write-arch-port-build-info.py \
+            packages/x810-device-support/files/usr/share/tab-companion/port-build.json \
+            "$PORT_VERSION" "$BUILD_RUN_ID" "$BUILD_RUN_NUMBER" "$BUILD_COMMIT" "$BUILD_BRANCH"
 
       - name: Build and audit the complete Arch GNOME rootfs
         run: rootfs/build-rootfs.sh
@@ -476,10 +440,9 @@ jobs:
           compression-level: 0
 
   publish_full_set:
-    needs: [plan, build_packages, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs]
+    needs: [plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs]
     if: >-
       always() && needs.plan.result == 'success' &&
-      needs.build_packages.result == 'success' &&
       needs.build_port_update.result == 'success' &&
       needs.prepare_kernel_modules.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
@@ -527,7 +490,7 @@ jobs:
         run: bash tools/publish-arch-full-set.sh
 
   prune_old_releases:
-    needs: [publication_identity, plan, build_packages, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs, publish_full_set]
+    needs: [publication_identity, plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs, publish_full_set]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:

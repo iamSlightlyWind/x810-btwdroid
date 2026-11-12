@@ -11,12 +11,12 @@ does not install a generic kernel. The installer formats only the existing
 workflow uses Fedora's job graph: `publication_identity`,
 `build_port_update`, `plan`, kernel component preparation, `resolve_rootfs`,
 `build_rootfs`, `publish_full_set`, then `prune_old_releases`. The updater job
-runs the contract tests, builds all Arch packages, and hands off `update.zip`
-and the exact package archives. The rootfs job consumes those package
-archives and the separately verified X810 kernel-module artifact. Arch uses
-the existing Fedora kernel release rather than building a kernel. Its rolling
-repositories mean every rootfs is freshly built, not reused from a source-only
-fingerprint.
+runs the contract tests, builds Arch packages, and hands off `update.zip`.
+Independently, the rootfs job builds its own package copies and consumes the
+separately verified X810 kernel-module artifact; it does not wait for the
+updater job. Arch uses the existing Fedora kernel release rather than building
+a kernel. Because Arch repositories roll, every rootfs is freshly built rather
+than reused from a source-only fingerprint.
 
 The internal script downloads the pinned Arch ARM bootstrap, stages the
 matching module tree, builds the GNOME profile, audits it, and creates the

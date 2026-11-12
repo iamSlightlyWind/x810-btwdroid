@@ -33,8 +33,9 @@ GDM profile, then prepares `out/rootfs.tar.zst` and its release manifest.
 GitHub Actions mirrors Fedora's job graph: `publication_identity`,
 `build_port_update`, `plan`, kernel-module preparation, `resolve_rootfs`,
 `build_rootfs`, `publish_full_set`, and `prune_old_releases`. The updater job
-tests/builds the Arch packages and `update.zip` independently; the rootfs job
-uses those exact packages. Arch has no kernel build stage because it uses the
+builds the Arch packages and `update.zip`; independently, the rootfs job builds
+its own package copies while constructing the image. Only the final publisher
+waits for both outputs. Arch has no kernel build stage because it uses the
 matching X810 modules from the Fedora kernel release. The final release
 contains both rootfs and Tab Companion update assets, and older Arch releases
 are pruned only after the aggregate is verified. The build does not access

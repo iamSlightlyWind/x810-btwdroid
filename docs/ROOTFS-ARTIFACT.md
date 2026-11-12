@@ -4,9 +4,10 @@
 and `out/SHA256SUMS`. GitHub Actions follows Fedora's multi-job graph:
 `publication_identity`, `build_port_update`, `plan`, kernel-module
 preparation, `resolve_rootfs`, `build_rootfs`, `publish_full_set`, and
-`prune_old_releases`. The updater job tests/builds the Arch packages and
-`update.zip`; the rootfs job consumes those exact package artifacts and the
-verified module receipt. The aggregate publisher validates and publishes
+`prune_old_releases`. The updater job independently builds Arch packages and
+`update.zip`. The rootfs job separately builds its own package copies as part
+of image construction and consumes only the verified module receipt; it has no
+dependency on the updater job. The aggregate publisher validates and publishes
 rootfs plus updater assets together, and pruning runs only after validation.
 The manifest records the Fedora kernel release and module/RPM hashes consumed
 by the Arch image. The Python installer
