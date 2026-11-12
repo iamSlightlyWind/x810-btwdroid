@@ -138,12 +138,15 @@ class RootfsImageProfileTests(unittest.TestCase):
     def test_public_build_removes_bootstrap_credentials_before_archive(self):
         configure = (TOOLS / "configure-ssh-rootfs.sh").read_text(encoding="utf-8")
         audit = (TOOLS / "audit-rootfs.sh").read_text(encoding="utf-8")
-        for marker in ("/home/alarm/.ssh", "ssh_host_*_key", "system-connections",
+        for marker in (r"-name .ssh\*", "ssh_host_*_key", "system-connections",
                        "wpa_supplicant.conf", "/var/lib/tailscale"):
             self.assertIn(marker, configure)
         self.assertIn("No private Wi-Fi, SSH, account, or Tailscale state", configure)
-        self.assertIn("*/.ssh*", audit)
+        self.assertIn(r"-name .ssh\*", audit)
         self.assertIn("-name alarm", audit)
+        profile = (TOOLS / "install-gnome-profile.sh").read_text(encoding="utf-8")
+        self.assertIn("find \"$home_root\" -mindepth 1 -name '.ssh*'", profile)
+        self.assertIn("Unexpected SSH material remains in the public image", audit)
 
     def test_pacman_policy_disables_only_filesystem_sandbox(self):
         text = "[options]\nDisableSandboxFilesystem\n#DisableSandboxSyscalls\n[core]\n"

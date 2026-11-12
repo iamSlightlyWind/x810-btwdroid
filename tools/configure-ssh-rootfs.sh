@@ -74,10 +74,17 @@ EOF
       -exec rm -rf -- {} + 2>/dev/null || true
     rm -f "$rootfs/etc/wpa_supplicant/wpa_supplicant.conf"
     rm -rf "$rootfs/var/lib/tailscale"
-    rm -rf "$rootfs/home/alarm/.ssh"
-    find "$rootfs/home" -mindepth 2 -maxdepth 2 -type d -name .ssh -prune \
-      -exec rm -rf -- {} + 2>/dev/null || true
-    rm -rf "$rootfs/root/.ssh"
+    # Remove SSH state for every account and every depth, not just the stock
+    # ALARM home. The public installer image is always a clean seed.
+    for home_root in "$rootfs/home" "$rootfs/root"; do
+      if [[ -d "$home_root" ]]; then
+        find "$home_root" -mindepth 1 -name .ssh\* -prune \
+          -exec rm -rf -- {} + || {
+            echo "could not remove SSH material under $home_root" >&2
+            exit 1
+          }
+      fi
+    done
     rm -f "$rootfs"/home/alarm/.bash_history "$rootfs"/root/.bash_history
 
     # NetworkManager owns networking on the installed system. Disable the

@@ -198,6 +198,16 @@ pacman_disable_sandbox_syscalls=no
 EOF
 chmod 0644 "$rootfs/etc/windstation-arch-profile"
 
+# Package hooks can create or expose home trees after first-boot provisioning.
+# Scrub all accounts again at the end, regardless of username/depth.
+for home_root in "$rootfs/home" "$rootfs/root"; do
+    if [[ -d "$home_root" ]]; then
+        find "$home_root" -mindepth 1 -name '.ssh*' -prune \
+            -exec rm -rf -- {} + \
+            || die "could not remove SSH material under $home_root"
+    fi
+done
+
 "$script_dir/audit-rootfs.sh"
 
 echo "Built and audited the GNOME/GDM Arch profile in the staged rootfs."

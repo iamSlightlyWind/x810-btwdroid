@@ -36,7 +36,12 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
       fi
     }
     no_home_ssh_dirs() {
-      [[ -z "$(find "$rootfs/home" "$rootfs/root" -path "*/.ssh*" -print -quit 2>/dev/null)" ]]
+      local found
+      found="$(find "$rootfs/home" "$rootfs/root" -mindepth 1 -name .ssh\* -print -quit 2>/dev/null)"
+      if [[ -n "$found" ]]; then
+        echo "Unexpected SSH material remains in the public image: $found" >&2
+        return 1
+      fi
     }
     no_extra_homes() {
       [[ -z "$(find "$rootfs/home" -mindepth 1 -maxdepth 1 ! -name alarm -print -quit 2>/dev/null)" ]]
