@@ -207,6 +207,8 @@ def verify_archive(path: pathlib.Path,
                 if (lower.startswith("etc/NetworkManager/system-connections/")
                         and member.isfile()):
                     raise ValueError("public rootfs contains saved NetworkManager credentials")
+                if lower.startswith("var/cache/pacman/pkg/") and member.isfile():
+                    raise ValueError("public rootfs contains cached package archives")
                 if normalized.startswith("etc/NetworkManager/system-connections/") and member.isfile():
                     nm_profile_count += 1
                 if normalized == "run":

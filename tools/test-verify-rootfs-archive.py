@@ -42,6 +42,7 @@ class ArchiveFixture:
                  omit_display_manager_alias: bool = False,
                  omit_graphical_display_manager_wants: bool = False,
                  os_release_symlink: bool = False,
+                 cached_package_archive: bool = False,
                  optional_app: str | None = None,
                  arch_dualboot_backend: bool = True,
                  private_credentials: bool | str = False) -> None:
@@ -51,6 +52,7 @@ class ArchiveFixture:
         self.omit_display_manager_alias = omit_display_manager_alias
         self.omit_graphical_display_manager_wants = omit_graphical_display_manager_wants
         self.os_release_symlink = os_release_symlink
+        self.cached_package_archive = cached_package_archive
         self.optional_app = optional_app
         self.arch_dualboot_backend = arch_dualboot_backend
         self.private_credentials = private_credentials
@@ -130,6 +132,8 @@ class ArchiveFixture:
                                 else "home/alarm/.ssh/authorized_keys")
                 self.add_file(archive, private_path, b"private test state\n",
                               mode=0o600, uid=1000, gid=1000)
+            if self.cached_package_archive:
+                self.add_file(archive, "var/cache/pacman/pkg/cached.pkg.tar.zst", b"cached package")
             self.add_file(archive, "usr/lib/modules/7.2.0-gts9wifi/modules.dep", b"# synthetic modules index\n")
             self.add_file(archive, "usr/lib/firmware/ath11k/WCN6855/hw2.1/board-2.bin", b"synthetic board data\n")
             self.add_file(archive, "usr/lib/systemd/system/gdm.service", b"[Service]\nExecStart=/usr/bin/gdm\n")
@@ -292,6 +296,11 @@ class VerifyRootfsArchiveIntegrationTests(unittest.TestCase):
                     else "SSH credential material"
                 )
                 self.assertIn(expected_failure, result.stderr)
+
+    def test_rejects_cached_package_archives(self):
+        result = self.run_verifier(ArchiveFixture(cached_package_archive=True))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cached package archives", result.stderr)
 
 
 if __name__ == "__main__":

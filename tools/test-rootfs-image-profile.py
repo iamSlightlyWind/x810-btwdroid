@@ -151,7 +151,10 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn("-name alarm", audit)
         profile = (TOOLS / "install-gnome-profile.sh").read_text(encoding="utf-8")
         self.assertIn('"$script_dir/scrub-rootfs-private-state.sh"', profile)
+        self.assertIn('pacman-target.sh" --builder-mode -Scc --noconfirm', profile)
+        self.assertLess(profile.index('--builder-mode -Scc --noconfirm'), profile.index('"$script_dir/audit-rootfs.sh"'))
         self.assertIn("Private SSH or Wi-Fi credential path remains in target rootfs", audit)
+        self.assertIn('audit_check "downloaded pacman package archives are absent" no_cached_packages', audit)
         scrub = (TOOLS / "scrub-rootfs-private-state.sh").read_text(encoding="utf-8")
         for marker in ('-iname ".ssh*"', '-iname "authorized_keys"',
                        '-iname "*ssh_host_*"', '-iname "wpa_supplicant.conf"',

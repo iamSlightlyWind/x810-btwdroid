@@ -196,6 +196,10 @@ chmod 0644 "$rootfs/etc/windstation-arch-profile"
 # Scrub all release-private state using PRoot's fake-root view of the target.
 "$script_dir/scrub-rootfs-private-state.sh"
 
+# The installer image is not a package cache. Drop downloaded package archives
+# and sync databases after the final transaction; the installed pacman DB stays.
+"$script_dir/pacman-target.sh" --builder-mode -Scc --noconfirm
+
 "$script_dir/audit-rootfs.sh"
 
 echo "Built and audited the GNOME/GDM Arch profile in the staged rootfs."

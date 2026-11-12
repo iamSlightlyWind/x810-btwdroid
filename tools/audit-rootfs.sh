@@ -64,6 +64,10 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     no_nm_profiles() {
       [[ -z "$(find "$rootfs/etc/NetworkManager/system-connections" -type f -print -quit 2>/dev/null)" ]]
     }
+    no_cached_packages() {
+      [[ ! -d "$rootfs/var/cache/pacman/pkg" ]] \
+        || [[ -z "$(find "$rootfs/var/cache/pacman/pkg" -type f -print -quit 2>/dev/null)" ]]
+    }
     no_optional_apps() {
       local package
       for package in gnome-console gnome-boxes gnome-books; do
@@ -106,6 +110,7 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     audit_check "Tailscale device state is absent" no_tailscale_state
     audit_check "SSH and Wi-Fi credential paths are absent throughout rootfs" no_private_ssh_wifi_paths
     audit_check "NetworkManager saved profiles are absent" no_nm_profiles
+    audit_check "downloaded pacman package archives are absent" no_cached_packages
     audit_check "no non-installer user home is included" no_extra_homes
     audit_check "password SSH is configured" grep -Fxq PasswordAuthentication\ yes "$rootfs/etc/ssh/sshd_config.d/90-windstation.conf"
     audit_check "root SSH login is disabled" grep -Fxq PermitRootLogin\ no "$rootfs/etc/ssh/sshd_config.d/90-windstation.conf"
