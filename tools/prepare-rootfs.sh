@@ -27,5 +27,10 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
       --directory=/target --numeric-owner --same-owner --same-permissions \
       --xattrs --xattrs-include="*" --acls'
 
+mirrorlist="$rootfs/etc/pacman.d/mirrorlist"
+[[ -f "$mirrorlist" && ! -L "$mirrorlist" ]] \
+    || { echo "Missing or unsafe target ALARM mirrorlist: $mirrorlist" >&2; exit 1; }
+python3 "$script_dir/configure-alarm-mirrors.py" "$mirrorlist"
+
 echo "Extracted signed generic AArch64 bootstrap into: $rootfs"
 echo "This is a disposable staging tree; Windstation was not accessed or modified."

@@ -61,6 +61,9 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn("No build-time user, SSH key, Wi-Fi credential", script)
         self.assertNotIn("adb", script)
         self.assertNotIn("import-connectivity-state.sh", script)
+        prepare = (TOOLS / "prepare-rootfs.sh").read_text(encoding="utf-8")
+        self.assertIn("configure-alarm-mirrors.py", prepare)
+        self.assertIn("Missing or unsafe target ALARM mirrorlist", prepare)
 
     def test_profile_and_rootfs_audit_report_named_metadata_failures(self):
         project = TOOLS.parent
