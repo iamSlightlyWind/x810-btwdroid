@@ -63,3 +63,4 @@ venv/
 
 # Generated local artifact identity; never publish paths or hashes for private archives.
 /docs/ARCH-ROOTFS-ARTIFACT.lock
+/packages/x810-device-support/files/usr/share/tab-companion/port-build.json

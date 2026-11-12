@@ -1,8 +1,15 @@
 # Public rootfs release
 
 `rootfs/build-rootfs.sh` produces `out/rootfs.tar.zst`, `out/manifest.json`,
-and `out/SHA256SUMS`. The archive verifier checks the complete rootfs before
-GitHub Actions publishes those files as one release. The Python installer
+and `out/SHA256SUMS`. GitHub Actions follows Fedora's multi-job graph:
+`publication_identity`, `build_port_update`, `plan`, kernel-module
+preparation, `resolve_rootfs`, `build_rootfs`, `publish_full_set`, and
+`prune_old_releases`. The updater job tests/builds the Arch packages and
+`update.zip`; the rootfs job consumes those exact package artifacts and the
+verified module receipt. The aggregate publisher validates and publishes
+rootfs plus updater assets together, and pruning runs only after validation.
+The manifest records the Fedora kernel release and module/RPM hashes consumed
+by the Arch image. The Python installer
 downloads the release manifest and rootfs, verifies GitHub metadata and the
 declared SHA-256/size, then performs content validation before showing an
 install plan.

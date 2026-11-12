@@ -27,6 +27,10 @@ package() {
     "$pkgdir/etc/systemd/zram-generator.conf.d/80-x810.conf"
   install -Dm0644 "$startdir/files/usr/share/tab-companion/port.json" \
     "$pkgdir/usr/share/tab-companion/port.json"
+  if [[ -s "$startdir/files/usr/share/tab-companion/port-build.json" ]]; then
+    install -Dm0644 "$startdir/files/usr/share/tab-companion/port-build.json" \
+      "$pkgdir/usr/share/tab-companion/port-build.json"
+  fi
   install -Dm0644 "$startdir/LICENSE" \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

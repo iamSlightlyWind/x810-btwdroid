@@ -42,6 +42,7 @@ EXPECTED_FILES: dict[str, tuple[int, int, int | None]] = {
     "usr/local/libexec/tab-companion-boot-status": (0, 0, 0o755),
     "usr/local/libexec/tab-companion-boot-switch": (0, 0, 0o755),
     "usr/share/tab-companion/port.json": (0, 0, None),
+    "usr/share/tab-companion/port-build.json": (0, 0, 0o644),
     "usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/extension.js": (0, 0, None),
     "usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json": (0, 0, None),
 }
@@ -85,6 +86,17 @@ def package_name_from_desc(data: bytes) -> str:
     if not re.fullmatch(r"[A-Za-z0-9@._+-]+", name):
         raise ValueError("invalid package name in pacman database record")
     return name
+
+
+def package_version_from_desc(data: bytes) -> str:
+    lines = data.decode("utf-8", errors="strict").splitlines()
+    values = [index + 1 for index, line in enumerate(lines) if line == "%VERSION%"]
+    if len(values) != 1 or values[0] >= len(lines):
+        raise ValueError("malformed pacman package database version record")
+    version = lines[values[0]].strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9:.+_~-]{0,127}", version):
+        raise ValueError("invalid package version in pacman database record")
+    return version
 
 
 def graphical_target_wants_display_manager(data: bytes) -> bool:
@@ -144,13 +156,16 @@ def _read_member(archive: tarfile.TarFile, member: tarfile.TarInfo, label: str) 
     return stream.read()
 
 
-def verify_archive(path: pathlib.Path) -> None:
+def verify_archive(path: pathlib.Path,
+                   expected_port_identity: dict[str, object] | None = None,
+                   expected_support_package_version: str | None = None) -> None:
     test = subprocess.run(["zstd", "-q", "-t", str(path)], check=False,
                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     if test.returncode:
         raise ValueError(f"zstd integrity check failed: {test.stderr.strip()}")
     seen: dict[str, tuple[int, int, int, bool, str]] = {}
     package_records: set[str] = set()
+    package_versions: dict[str, str] = {}
     run_entries: list[str] = []
     symlinks: dict[str, str] = {}
     captured: dict[str, bytes] = {}
@@ -205,11 +220,13 @@ def verify_archive(path: pathlib.Path) -> None:
                         module_releases.add(tail.split("/", 1)[0])
                 if (member.isfile() and normalized.startswith("var/lib/pacman/local/")
                         and normalized.endswith("/desc")):
-                    name = package_name_from_desc(_read_member(archive, member, "pacman database record"))
+                    desc = _read_member(archive, member, "pacman database record")
+                    name = package_name_from_desc(desc)
                     if name in REQUIRED_PROFILE_PACKAGES | FORBIDDEN_OPTIONAL_DESKTOP_PACKAGES | {"linux-aarch64"}:
                         if name in package_records:
                             raise ValueError(f"duplicate pacman package record: {name}")
                         package_records.add(name)
+                        package_versions[name] = package_version_from_desc(desc)
                 if member.isfile() and normalized in {
                     "etc/pacman.conf", "etc/shadow", "etc/passwd", "etc/os-release",
                     "etc/bluetooth/main.conf", "etc/sudoers.d/40-windstation",
@@ -218,6 +235,7 @@ def verify_archive(path: pathlib.Path) -> None:
                     "usr/local/libexec/x810-boot-switch-core",
                     "usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json",
                     "usr/share/tab-companion/port.json",
+                    "usr/share/tab-companion/port-build.json",
                 }:
                     captured[normalized] = _read_member(archive, member, normalized)
     finally:
@@ -228,6 +246,9 @@ def verify_archive(path: pathlib.Path) -> None:
     missing = REQUIRED_PROFILE_PACKAGES - package_records
     if missing:
         raise ValueError("pacman database missing required packages: " + ", ".join(sorted(missing)))
+    if (expected_support_package_version is not None
+            and package_versions.get("x810-device-support") != expected_support_package_version):
+        raise ValueError("rootfs x810-device-support package version does not match update.zip")
     forbidden_packages = package_records & (FORBIDDEN_OPTIONAL_DESKTOP_PACKAGES | {"linux-aarch64"})
     if forbidden_packages:
         raise ValueError("rootfs contains forbidden packages: " + ", ".join(sorted(forbidden_packages)))
@@ -284,11 +305,47 @@ def verify_archive(path: pathlib.Path) -> None:
         port = json.loads(captured["usr/share/tab-companion/port.json"])
         if not isinstance(port, dict) or port.get("port_id") != "x810-arch":
             raise ValueError("Tab Companion Arch port metadata is missing or invalid")
+        expected_port_fields = {
+            "device_id": "SM-X810",
+            "os_id": "archarm",
+            "os_version": "rolling",
+            "arch": "aarch64",
+            "workflow_file": "x810-arch.yml",
+            "artifact_name": "update",
+            "release_tag_prefix": "x810-arch-build",
+        }
+        if (any(port.get(key) != value for key, value in expected_port_fields.items())
+                or port.get("public_release") is not True):
+            raise ValueError("Tab Companion Arch update target/release metadata is invalid")
         capabilities = port.get("capabilities")
         if (not isinstance(capabilities, dict) or capabilities.get("dualboot") is not True
-                or port.get("port_update") != {"backend": "pacman", "available": False}
+                or capabilities.get("port_update") is not True
+                or port.get("port_update") != {"backend": "pacman", "available": True}
                 or port.get("kernel_update") != {"backend": "pacman", "available": False}):
-            raise ValueError("Arch port metadata must enable dualboot and disable unavailable package/kernel feeds")
+            raise ValueError("Arch port metadata must enable dualboot and the package feed, but disable kernel updates")
+        port_version = port.get("version")
+        if (not isinstance(port_version, str)
+                or not re.fullmatch(r"(?:0|[1-9][0-9]{0,19})\.(?:0|[1-9][0-9]{0,19})\.(?:0|[1-9][0-9]{0,19})", port_version)
+                or port.get("build_info_path") != "/usr/share/tab-companion/port-build.json"):
+            raise ValueError("Arch port update version/build-info metadata is missing or invalid")
+        build_info = json.loads(captured["usr/share/tab-companion/port-build.json"])
+        if (not isinstance(build_info, dict)
+                or build_info.get("schema_version") != 1
+                or build_info.get("project") != "x810-arch"
+                or build_info.get("version") != port_version
+                or isinstance(build_info.get("run_id"), bool)
+                or not isinstance(build_info.get("run_id"), int) or build_info["run_id"] < 1
+                or isinstance(build_info.get("run_number"), bool)
+                or not isinstance(build_info.get("run_number"), int) or build_info["run_number"] < 1
+                or not re.fullmatch(r"[0-9a-f]{40,64}", str(build_info.get("commit", "")))
+                or not isinstance(build_info.get("branch"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_./-]{1,200}", build_info["branch"])):
+            raise ValueError("Arch port build-info provenance is missing or invalid")
+        if expected_port_identity is not None:
+            for key, expected in expected_port_identity.items():
+                actual = port_version if key == "version" else build_info.get(key)
+                if actual != expected:
+                    raise ValueError(f"Arch port build provenance does not match expected {key}")
         extension = json.loads(captured[
             "usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json"
         ])
@@ -308,11 +365,31 @@ def verify_archive(path: pathlib.Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("archive", type=pathlib.Path)
+    parser.add_argument("--expected-port-version")
+    parser.add_argument("--expected-run-id", type=int)
+    parser.add_argument("--expected-run-number", type=int)
+    parser.add_argument("--expected-commit")
+    parser.add_argument("--expected-branch")
+    parser.add_argument("--expected-support-package-version")
     args = parser.parse_args()
     if not args.archive.is_file() or args.archive.is_symlink():
         parser.error("archive must be a regular file")
+    expected_values = {
+        "version": args.expected_port_version,
+        "run_id": args.expected_run_id,
+        "run_number": args.expected_run_number,
+        "commit": args.expected_commit,
+        "branch": args.expected_branch,
+    }
+    if any(value is not None for value in expected_values.values()) and any(
+            value is None for value in expected_values.values()):
+        parser.error("all expected publication identity options must be supplied together")
     try:
-        verify_archive(args.archive)
+        verify_archive(
+            args.archive,
+            expected_values if args.expected_port_version is not None else None,
+            args.expected_support_package_version,
+        )
     except (OSError, ValueError, tarfile.TarError, subprocess.SubprocessError) as error:
         raise SystemExit(f"rootfs archive verification failed: {error}") from error
     print("Public rootfs verified: minimal GNOME/GDM, matching X810 modules, Bluetooth, Tab Companion dualboot, locked generic seed account, and no private credentials.")

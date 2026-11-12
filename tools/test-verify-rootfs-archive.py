@@ -138,10 +138,17 @@ class ArchiveFixture:
                 self.add_file(archive, f"usr/local/libexec/{name}", b"#!/bin/sh\n", mode=0o755)
             self.add_file(archive, "usr/libexec/tab-companion-admin", b"#!/bin/sh\n", mode=0o755)
             self.add_file(archive, "usr/share/tab-companion/port.json",
-                          b'{"port_id":"x810-arch","workflow_file":"build-updates.yml",'
-                          b'"public_release":true,"capabilities":{"dualboot":true},'
-                          b'"port_update":{"backend":"pacman","available":false},'
+                          b'{"port_id":"x810-arch","device_id":"SM-X810","os_id":"archarm",'
+                          b'"os_version":"rolling","arch":"aarch64","workflow_file":"x810-arch.yml",'
+                          b'"version":"0.1.0","build_info_path":"/usr/share/tab-companion/port-build.json",'
+                          b'"artifact_name":"update","release_tag_prefix":"x810-arch-build",'
+                          b'"public_release":true,"capabilities":{"dualboot":true,"port_update":true},'
+                          b'"port_update":{"backend":"pacman","available":true},'
                           b'"kernel_update":{"backend":"pacman","available":false}}\n')
+            self.add_file(archive, "usr/share/tab-companion/port-build.json",
+                          (b'{"schema_version":1,"project":"x810-arch","version":"0.1.0",'
+                           b'"run_id":123,"run_number":17,"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",'
+                           b'"branch":"main"}\n'))
             self.add_file(archive, "usr/share/polkit-1/actions/io.github.agcarbajo.TabCompanion.Admin.policy", b"<policyconfig/>\n")
             self.add_file(archive, "usr/share/polkit-1/actions/io.github.agcarbajo.TabCompanion.X810.policy", b"<policyconfig/>\n")
             extension_dir = "usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io"
@@ -160,7 +167,8 @@ class ArchiveFixture:
                     continue
                 dbdir = f"var/lib/pacman/local/{package}-1.0-1"
                 self.add_dir(archive, dbdir, mode=0o755)
-                self.add_file(archive, f"{dbdir}/desc", f"%NAME%\n{package}\n\n%VERSION%\n1.0-1\n".encode())
+                package_version = "0.1.0-3" if package == "x810-device-support" else "1.0-1"
+                self.add_file(archive, f"{dbdir}/desc", f"%NAME%\n{package}\n\n%VERSION%\n{package_version}\n".encode())
             if self.optional_app:
                 dbdir = f"var/lib/pacman/local/{self.optional_app}-1.0-1"
                 self.add_dir(archive, dbdir, mode=0o755)
@@ -178,12 +186,12 @@ class ArchiveFixture:
 
 @unittest.skipUnless(shutil.which("zstd"), "zstd is required")
 class VerifyRootfsArchiveIntegrationTests(unittest.TestCase):
-    def run_verifier(self, fixture: ArchiveFixture) -> subprocess.CompletedProcess[str]:
+    def run_verifier(self, fixture: ArchiveFixture, *extra: str) -> subprocess.CompletedProcess[str]:
         with tempfile.TemporaryDirectory() as temporary:
             archive_path = Path(temporary) / "rootfs.tar.zst"
             fixture.write_zstd_archive(archive_path)
             return subprocess.run(
-                ["python3", str(VERIFIER), str(archive_path)],
+                ["python3", str(VERIFIER), str(archive_path), *extra],
                 check=False,
                 text=True,
                 stdout=subprocess.PIPE,
@@ -194,6 +202,28 @@ class VerifyRootfsArchiveIntegrationTests(unittest.TestCase):
         result = self.run_verifier(ArchiveFixture())
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Tab Companion dualboot", result.stdout)
+
+    def test_release_publisher_can_require_the_embedded_port_build_identity(self):
+        result = self.run_verifier(
+            ArchiveFixture(), "--expected-port-version", "0.1.0", "--expected-run-id", "123",
+            "--expected-run-number", "17", "--expected-commit", "a" * 40, "--expected-branch", "main",
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_release_publisher_rejects_a_mismatched_embedded_run_identity(self):
+        result = self.run_verifier(
+            ArchiveFixture(), "--expected-port-version", "0.1.0", "--expected-run-id", "999",
+            "--expected-run-number", "17", "--expected-commit", "a" * 40, "--expected-branch", "main",
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("does not match expected run_id", result.stderr)
+
+    def test_release_publisher_requires_rootfs_support_package_to_match_update(self):
+        result = self.run_verifier(ArchiveFixture(), "--expected-support-package-version", "0.1.0-3")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        mismatch = self.run_verifier(ArchiveFixture(), "--expected-support-package-version", "0.1.0-4")
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("does not match update.zip", mismatch.stderr)
 
     def test_rejects_fedora_only_dualboot_backend(self):
         result = self.run_verifier(ArchiveFixture(arch_dualboot_backend=False))

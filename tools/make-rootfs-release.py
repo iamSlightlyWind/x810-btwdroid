@@ -37,6 +37,25 @@ def main() -> int:
         print(f"rootfs archive size is outside the GitHub release asset limit: {size}", file=sys.stderr)
         return 2
     digest = sha256_file(archive)
+    kernel_receipt_path = project / "cache/public-kernel/kernel.json"
+    try:
+        kernel = json.loads(kernel_receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        print(f"verified kernel receipt is missing or invalid: {error}", file=sys.stderr)
+        return 2
+    if (not isinstance(kernel, dict) or kernel.get("schema_version") != 1
+            or kernel.get("repository") != "iamSlightlyWind/x810-fedroid"
+            or kernel.get("kernel_release") != "7.2.0-gts9wifi"
+            or not isinstance(kernel.get("kernel_rpm"), dict)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(kernel["kernel_rpm"].get("sha256", "")))
+            or not isinstance(kernel.get("modules"), dict)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(kernel["modules"].get("sha256", "")))):
+        print("verified kernel receipt does not describe matching X810 modules", file=sys.stderr)
+        return 2
+    input_key = os.environ.get("X810_BUILD_INPUTS_KEY", "")
+    if input_key and not re.fullmatch(r"[0-9a-f]{64}", input_key):
+        print("X810_BUILD_INPUTS_KEY must be a lowercase SHA-256 digest", file=sys.stderr)
+        return 2
     manifest = {
         "schema_version": 1,
         "type": "x810-arch-release",
@@ -46,6 +65,8 @@ def main() -> int:
         "device": {"model": "SM-X810", "codename": "gts9pwifi"},
         "os": {"id": "archarm", "arch": "aarch64"},
         "kernel_release": "7.2.0-gts9wifi",
+        "kernel": kernel,
+        "build_inputs_key": input_key or None,
         "profile": [
             "GNOME Shell", "GDM", "GNOME Settings", "GNOME Terminal", "Brave",
             "BlueZ", "Tab Companion", "X810 module tree",

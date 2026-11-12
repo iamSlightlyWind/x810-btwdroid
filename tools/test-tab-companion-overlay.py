@@ -39,8 +39,13 @@ class BrowserOverlayTests(unittest.TestCase):
         self.assertIn('chown -R root:root "$pkgdir"', pkgbuild)
         port = json.loads((ROOT / "packages/x810-device-support/files/usr/share/tab-companion/port.json").read_text())
         self.assertTrue(port["capabilities"]["dualboot"])
+        self.assertTrue(port["capabilities"]["port_update"])
         self.assertEqual(port["kernel_update"], {"backend": "pacman", "available": False})
-        self.assertEqual(port["port_update"], {"backend": "pacman", "available": False})
+        self.assertEqual(port["port_update"], {"backend": "pacman", "available": True})
+        self.assertEqual(port["artifact_name"], "update")
+        self.assertEqual(port["release_tag_prefix"], "x810-arch-build")
+        self.assertIn("port-build.json", (ROOT / "packages/x810-device-support/PKGBUILD").read_text())
+        self.assertEqual((ROOT / "PORT_VERSION").read_text().strip(), port["version"])
         for extension in (
             "dualboot@agcarbajo.github.io",
             "spen-dock@agcarbajo.github.io",
@@ -68,6 +73,7 @@ class BrowserOverlayTests(unittest.TestCase):
         self.assertIn("bluetooth.service", profile)
         self.assertIn("CARCH=aarch64", build)
         self.assertIn("brave-bin", build)
+        self.assertIn("write-arch-port-build-info.py", build)
         self.assertIn("arch=('aarch64')", brave)
         self.assertIn("sha256sums_aarch64", brave)
 

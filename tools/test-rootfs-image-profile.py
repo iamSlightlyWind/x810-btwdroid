@@ -54,6 +54,8 @@ class RootfsImageProfileTests(unittest.TestCase):
         offsets = [script.index(step) for step in steps]
         self.assertEqual(offsets, sorted(offsets))
         self.assertIn("networkmanager wpa_supplicant openssh sudo zram-generator", script)
+        self.assertIn('X810_PREBUILT_KERNEL_MODULES', script)
+        self.assertIn('X810_PREBUILT_PACKAGES', script)
         self.assertIn("work/rootfs already contains a staged tree", script)
         self.assertIn("No build-time user, SSH key, Wi-Fi credential", script)
         self.assertNotIn("adb", script)

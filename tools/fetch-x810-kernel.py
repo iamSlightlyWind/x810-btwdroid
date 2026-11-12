@@ -9,9 +9,11 @@ before the RPM payload is extracted.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -40,6 +42,77 @@ def sha256_file(path: Path) -> str:
         for block in iter(lambda: source.read(4 * 1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def module_tree_identity(root: Path) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    modules = sorted(path for path in root.rglob("*.ko*") if path.is_file())
+    if not modules:
+        raise RuntimeError(f"kernel module tree contains no module objects: {root}")
+    for path in modules:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative + b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest(), len(modules)
+
+
+def write_kernel_receipt(
+    path: Path, release: dict[str, Any], manifest: dict[str, Any],
+    asset: dict[str, Any], module_root: Path,
+) -> dict[str, Any]:
+    module_sha256, module_count = module_tree_identity(module_root)
+    receipt = {
+        "schema_version": 1,
+        "repository": REPOSITORY,
+        "release_tag": release.get("tag_name"),
+        "source_commit": manifest.get("source_commit"),
+        "kernel_release": KERNEL_RELEASE,
+        "kernel_rpm": {
+            "sha256": asset["sha256"],
+            "size_bytes": asset["size_bytes"],
+        },
+        "modules": {
+            "sha256": module_sha256,
+            "file_count": module_count,
+        },
+    }
+    if (not isinstance(receipt["release_tag"], str) or not receipt["release_tag"]
+            or not isinstance(receipt["source_commit"], str)
+            or not re.fullmatch(r"[0-9a-f]{40,64}", receipt["source_commit"])):
+        raise RuntimeError("X810 release manifest lacks valid release provenance")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.partial-{os.getpid()}")
+    temporary.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+    return receipt
+
+
+def validate_kernel_receipt(path: Path, module_root: Path) -> dict[str, Any]:
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"could not read kernel receipt: {error}") from error
+    if (not isinstance(receipt, dict) or receipt.get("schema_version") != 1
+            or receipt.get("repository") != REPOSITORY
+            or receipt.get("kernel_release") != KERNEL_RELEASE
+            or not isinstance(receipt.get("release_tag"), str) or not receipt["release_tag"]
+            or not isinstance(receipt.get("source_commit"), str)
+            or not re.fullmatch(r"[0-9a-f]{40,64}", receipt["source_commit"])):
+        raise RuntimeError("kernel receipt has invalid X810 release provenance")
+    rpm = receipt.get("kernel_rpm")
+    modules = receipt.get("modules")
+    if (not isinstance(rpm, dict) or not re.fullmatch(r"[0-9a-f]{64}", str(rpm.get("sha256", "")))
+            or not isinstance(rpm.get("size_bytes"), int) or rpm["size_bytes"] <= 0
+            or not isinstance(modules, dict)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(modules.get("sha256", "")))):
+        raise RuntimeError("kernel receipt has invalid RPM/module hashes")
+    actual_hash, actual_count = module_tree_identity(module_root)
+    if actual_hash != modules["sha256"] or actual_count != modules.get("file_count"):
+        raise RuntimeError("prepared X810 module tree does not match its receipt")
+    if not (module_root / "modules.dep").is_file() or (module_root / "modules.dep").stat().st_size == 0:
+        raise RuntimeError("prepared X810 module tree is missing modules.dep")
+    return receipt
 
 
 def fetch_json(url: str, opener=urllib.request.urlopen) -> dict[str, Any]:
@@ -203,18 +276,31 @@ def extract_modules(rpm: Path, output_root: Path) -> Path:
     return target
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     project = Path(__file__).resolve().parents[1]
     cache = project / "cache" / "public-kernel"
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--receipt", type=Path, default=cache / "kernel.json")
+    parser.add_argument("--verify-prepared", action="store_true",
+                        help="verify the cached receipt and module tree without network access")
+    args = parser.parse_args(argv)
     try:
+        if args.verify_prepared:
+            receipt = validate_kernel_receipt(
+                args.receipt, cache / "usr/lib/modules" / KERNEL_RELEASE,
+            )
+            print(f"Verified prepared X810 kernel modules from {receipt['release_tag']}.")
+            return 0
         release = fetch_json(RELEASE_API)
         asset, manifest = release_kernel_asset(release)
         print(f"Using {release['tag_name']} ({manifest.get('source_commit', 'commit not recorded')}).", flush=True)
         rpm = cache / "kernel.rpm"
         if not rpm.is_file() or rpm.is_symlink() or rpm.stat().st_size != asset["size_bytes"] or sha256_file(rpm) != asset["sha256"]:
             download_asset(asset, rpm)
-        extract_modules(rpm, cache)
+        module_root = extract_modules(rpm, cache)
+        receipt = write_kernel_receipt(args.receipt, release, manifest, asset, module_root)
         print(f"Kernel release: {KERNEL_RELEASE}; RPM SHA-256: {asset['sha256']}")
+        print(f"Kernel receipt: {args.receipt}; module objects: {receipt['modules']['file_count']}")
         return 0
     except (OSError, RuntimeError, subprocess.SubprocessError, KeyError) as error:
         print(f"KERNEL MODULE PREPARATION FAILED: {error}", file=sys.stderr)

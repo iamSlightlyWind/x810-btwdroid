@@ -14,6 +14,19 @@ mkdir -p "$project_dir/out/packages" "$project_dir/work/makepkg/build" \
   "$project_dir/work/makepkg/sources" \
   "$podman_root" "$podman_runroot"
 
+# CI stages the successful-push identity before packaging. For local builds,
+# create useful provenance too, without claiming that the image is publishable.
+port_build_info="$project_dir/packages/x810-device-support/files/usr/share/tab-companion/port-build.json"
+if [[ ! -s "$port_build_info" ]]; then
+    port_version="$(tr -d '\r\n ' < "$project_dir/PORT_VERSION")"
+    build_run_id="${GITHUB_RUN_ID:-1}"
+    build_run_number="${GITHUB_RUN_NUMBER:-1}"
+    build_commit="${GITHUB_SHA:-$(git -C "$project_dir" rev-parse HEAD)}"
+    build_branch="${GITHUB_REF_NAME:-local}"
+    python3 "$script_dir/write-arch-port-build-info.py" "$port_build_info" \
+      "$port_version" "$build_run_id" "$build_run_number" "$build_commit" "$build_branch"
+fi
+
 # Keep one unambiguous current archive for each locally built package.
 shopt -s nullglob
 for name in x810-device-support tab-companion brave-bin; do

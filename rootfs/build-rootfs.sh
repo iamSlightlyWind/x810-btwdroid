@@ -30,12 +30,31 @@ python3 "$tools/fetch-alarm-rootfs.py"
 "$tools/build-builder-image.sh"
 "$tools/verify-alarm-rootfs.sh"
 "$tools/prepare-rootfs.sh"
-python3 "$tools/fetch-x810-kernel.py"
+if [[ "${X810_PREBUILT_KERNEL_MODULES:-0}" == 1 ]]; then
+  python3 "$tools/fetch-x810-kernel.py" --verify-prepared
+else
+  python3 "$tools/fetch-x810-kernel.py"
+fi
 "$tools/upgrade-rootfs.sh" networkmanager wpa_supplicant openssh sudo zram-generator
 "$tools/stage-x810-modules.sh"
 "$tools/stage-x810-wifi.sh"
 "$tools/configure-ssh-rootfs.sh"
-"$tools/build-packages.sh"
+if [[ "${X810_PREBUILT_PACKAGES:-0}" == 1 ]]; then
+  [[ -f "$project_dir/out/packages/SHA256SUMS" && ! -L "$project_dir/out/packages/SHA256SUMS" ]] \
+    || die "prebuilt package checksum manifest is missing"
+  (cd "$project_dir/out/packages" && sha256sum --check SHA256SUMS)
+  shopt -s nullglob
+  package_archives=("$project_dir"/out/packages/*.pkg.tar.zst)
+  shopt -u nullglob
+  [[ ${#package_archives[@]} -eq 3 ]] || die "expected exactly three prebuilt Arch package archives"
+  for package in x810-device-support tab-companion brave-bin; do
+    compgen -G "$project_dir/out/packages/$package-*.pkg.tar.zst" >/dev/null \
+      || die "prebuilt package artifact is missing $package"
+  done
+  echo "Using three prebuilt Arch package artifacts from the package build stage."
+else
+  "$tools/build-packages.sh"
+fi
 "$tools/install-gnome-profile.sh"
 "$tools/package-rootfs.sh" "$rootfs"
 python3 "$tools/make-rootfs-release.py"

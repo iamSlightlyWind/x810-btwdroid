@@ -13,91 +13,524 @@ on:
       - "tools/**"
       - ".gitignore"
       - ".github/workflows/x810-arch.yml"
-  pull_request:
-    paths:
-      - "PORT_VERSION"
-      - "README.md"
-      - "LICENSE"
-      - "rootfs/**"
-      - "docs/**"
-      - "packages/**"
-      - "tools/**"
-      - ".gitignore"
-      - ".github/workflows/x810-arch.yml"
   workflow_dispatch:
 
 permissions:
-  contents: read
+  actions: write
+  contents: write
+
+env:
+  KVER: 7.2.0-gts9wifi
 
 concurrency:
-  group: x810-arch-${{ github.ref }}
+  group: x810-arch-build-release
   cancel-in-progress: false
 
 jobs:
-  test:
+  # The public updater is tied to the successful push run ID. Manual rebuilds
+  # reuse that identity only when every release input is unchanged.
+  publication_identity:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    outputs:
+      run_id: ${{ steps.identity.outputs.run_id }}
+      run_number: ${{ steps.identity.outputs.run_number }}
+      commit: ${{ steps.identity.outputs.commit }}
+      branch: ${{ steps.identity.outputs.branch }}
     steps:
-      - name: Checkout
+      - name: Checkout full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve a compatible publication identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            run_id="$GITHUB_RUN_ID"
+            run_number="$GITHUB_RUN_NUMBER"
+            commit="$GITHUB_SHA"
+            branch="$GITHUB_REF_NAME"
+          else
+            run_data="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/x810-arch.yml/runs?branch=main&event=push&status=completed&per_page=100" --jq '[.workflow_runs[] | select(.conclusion == "success" and .head_branch == "main")] | max_by(.run_number) | [.id, .run_number, .head_sha, .head_branch] | @tsv')"
+            IFS=$'\t' read -r run_id run_number commit branch <<< "$run_data"
+            [[ "$run_id" =~ ^[0-9]+$ && "$run_number" =~ ^[0-9]+$ && "$commit" =~ ^[0-9a-f]{40,64}$ && "$branch" == main ]] || {
+              echo "No successful main-branch push build is available for this manual run." >&2
+              exit 1
+            }
+            git diff --quiet "$commit" "$GITHUB_SHA" -- PORT_VERSION README.md LICENSE rootfs docs packages tools .gitignore .github/workflows/x810-arch.yml || {
+              echo "Release inputs changed since the last successful push; complete the normal push build first." >&2
+              exit 1
+            }
+          fi
+          {
+            echo "run_id=$run_id"
+            echo "run_number=$run_number"
+            echo "commit=$commit"
+            echo "branch=$branch"
+          } >> "$GITHUB_OUTPUT"
+
+  # Like Fedora's build_port_update job, package/update output is built and
+  # tested independently of the rootfs planning and image build. The exact
+  # native package artifacts are handed to the rootfs job.
+  build_port_update:
+    needs: publication_identity
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      PODMAN_ROOT_OVERRIDE: /tmp/x810-arch-package-root
+      PODMAN_RUNROOT_OVERRIDE: /tmp/x810-arch-package-run
+      BUILD_RUN_ID: ${{ needs.publication_identity.outputs.run_id }}
+      BUILD_RUN_NUMBER: ${{ needs.publication_identity.outputs.run_number }}
+      BUILD_COMMIT: ${{ needs.publication_identity.outputs.commit }}
+      BUILD_BRANCH: ${{ needs.publication_identity.outputs.branch }}
+    steps:
+      - name: Check out the workflow commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install archive verification tools
+      - name: Install Arch package build tools
         run: |
+          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes zstd
+          sudo apt-get install --yes podman zstd
 
-      - name: Run installer, rootfs and package contract tests
+      - name: Run installer, package, rootfs, kernel and release contract tests
         run: |
           set -euo pipefail
           bash -n tools/*.sh rootfs/*.sh
           python3 -m compileall -q tools
           python3 tools/test-x810-install.py
+          python3 tools/test-fetch-x810-kernel.py
           python3 tools/test-target-pacman-policy.py
           python3 tools/test-rootfs-image-profile.py
           python3 tools/test-verify-rootfs-archive.py
           python3 tools/test-tab-companion-overlay.py
+          python3 tools/test-arch-port-release.py
+          python3 tools/test-x810-workflow.py
 
-  build_release:
-    needs: test
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+      - name: Stage port version and this push's build identity
+        run: |
+          set -euo pipefail
+          port_version="$(tr -d '\r\n ' < PORT_VERSION)"
+          [[ "$port_version" =~ ^(0|[1-9][0-9]{0,19})\.(0|[1-9][0-9]{0,19})\.(0|[1-9][0-9]{0,19})$ ]]
+          python3 - "$port_version" packages/x810-device-support/files/usr/share/tab-companion/port.json <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          version, path = sys.argv[1:]
+          port = json.loads(Path(path).read_text(encoding="utf-8"))
+          if not re.fullmatch(r"(?:0|[1-9][0-9]{0,19})\.(?:0|[1-9][0-9]{0,19})\.(?:0|[1-9][0-9]{0,19})", version):
+              raise SystemExit("PORT_VERSION must be numeric MAJOR.MINOR.PATCH")
+          if port.get("version") != version or port.get("port_id") != "x810-arch":
+              raise SystemExit("PORT_VERSION and Arch Tab Companion metadata disagree")
+          PY
+          python3 tools/write-arch-port-build-info.py packages/x810-device-support/files/usr/share/tab-companion/port-build.json "$port_version" "$BUILD_RUN_ID" "$BUILD_RUN_NUMBER" "$BUILD_COMMIT" "$BUILD_BRANCH"
+          echo "PORT_VERSION=$port_version" >> "$GITHUB_ENV"
+
+      - name: Build the Arch support packages and updater bundle
+        run: |
+          set -euo pipefail
+          tools/build-builder-image.sh
+          tools/build-packages.sh
+          mkdir -p _ci/packages _ci/update
+          package_count="$(find out/packages -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)"
+          [[ "$package_count" -eq 3 ]] || { echo "Expected exactly three Arch packages, found $package_count." >&2; exit 1; }
+          for name in x810-device-support tab-companion brave-bin; do
+            count="$(find out/packages -maxdepth 1 -type f -name "$name-*.pkg.tar.zst" | wc -l)"
+            [[ "$count" -eq 1 ]] || { echo "Expected exactly one $name package, found $count." >&2; exit 1; }
+          done
+          cp -- out/packages/*.pkg.tar.zst _ci/packages/
+          (cd _ci/packages && sha256sum ./*.pkg.tar.zst > SHA256SUMS)
+          support_package="$(find _ci/packages -maxdepth 1 -type f -name 'x810-device-support-*.pkg.tar.zst' -print -quit)"
+          python3 tools/make-arch-port-update-bundle.py --package "$support_package" --build-info packages/x810-device-support/files/usr/share/tab-companion/port-build.json --output _ci/update/update.zip
+
+      - name: Hand native package archives to the rootfs job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
+        with:
+          name: x810-arch-packages
+          path: _ci/packages/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Hand the updater ZIP to the aggregate release job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
+        with:
+          name: x810-port-update
+          path: _ci/update/update.zip
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  plan:
+    needs: publication_identity
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    permissions:
-      contents: write
-    env:
-      # Keep Podman runroot below old vfs-driver path limits; rootfs/build-rootfs.sh
-      # also defaults to the short ignored paths under this repository's tmp/.
-      PODMAN_RUNROOT_OVERRIDE: /tmp/x810-btwdroid-run
-      X810_RELEASE_TAG: x810-arch-build-${{ github.run_id }}
+    outputs:
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      publication_run_id: ${{ needs.publication_identity.outputs.run_id }}
+      publication_run_number: ${{ needs.publication_identity.outputs.run_number }}
+      source_commit: ${{ needs.publication_identity.outputs.commit }}
+      branch: ${{ needs.publication_identity.outputs.branch }}
+      port_version: ${{ steps.plan.outputs.port_version }}
     steps:
-      - name: Checkout
+      - name: Check out the workflow commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install build tools
+      - name: Run lightweight planner and rootfs integrity tests
+        run: |
+          set -euo pipefail
+          python3 tools/test-x810-install.py
+          python3 tools/test-rootfs-image-profile.py
+          python3 tools/test-verify-rootfs-archive.py
+
+      - name: Validate pinned bootstrap and plan the full release
+        id: plan
+        env:
+          SOURCE_COMMIT: ${{ needs.publication_identity.outputs.commit }}
+          PUBLICATION_RUN_ID: ${{ needs.publication_identity.outputs.run_id }}
+          PORT_VERSION_INPUT: ""
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]] || {
+            echo "Publication identity does not match the checked-out source commit." >&2
+            exit 1
+          }
+          port_version="$PORT_VERSION_INPUT"
+          if [ -z "$port_version" ]; then port_version="$(tr -d '\r\n ' < PORT_VERSION)"; fi
+          [[ "$port_version" =~ ^(0|[1-9][0-9]{0,19})\.(0|[1-9][0-9]{0,19})\.(0|[1-9][0-9]{0,19})$ ]]
+          python3 - "$port_version" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          lock = {}
+          for number, raw in enumerate(Path("docs/ALARM-ROOTFS.lock").read_text(encoding="utf-8").splitlines(), 1):
+              line = raw.strip()
+              if not line or line.startswith("#"):
+                  continue
+              key, separator, value = line.partition("=")
+              if not separator or key in lock:
+                  raise SystemExit(f"invalid or duplicate bootstrap lock entry on line {number}")
+              lock[key] = value
+          required = {
+              "source_url", "signature_url", "archive_path", "signature_path",
+              "archive_size_bytes", "archive_sha256", "signature_size_bytes", "signature_sha256",
+              "signer_fingerprint", "keyring_member",
+          }
+          missing = sorted(key for key in required if not lock.get(key))
+          if missing:
+              raise SystemExit("ALARM-ROOTFS.lock is incomplete: " + ", ".join(missing))
+          port = json.loads(Path("packages/x810-device-support/files/usr/share/tab-companion/port.json").read_text(encoding="utf-8"))
+          if port.get("version") != version or port.get("port_id") != "x810-arch":
+              raise SystemExit("PORT_VERSION does not match the Arch Tab Companion metadata")
+          print("Pinned Arch Linux ARM bootstrap and port update version are valid.")
+          PY
+          release_tag="x810-arch-build-$PUBLICATION_RUN_ID"
+          [[ "$release_tag" =~ ^x810-arch-build-[0-9]+$ ]]
+          {
+            echo "release_tag=$release_tag"
+            echo "port_version=$port_version"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### X810 Arch release plan"
+            echo "- Port version: `$port_version`; update bundle and rootfs are separate build stages."
+            echo "- Rootfs: always rebuild from the pinned Arch Linux ARM bootstrap because Arch repositories are rolling."
+            echo "- Kernel modules: resolve and verify the exact X810 module tree from the public Fedora kernel release."
+            echo "- Complete release: `$release_tag` (keyed to the successful push identity for Tab Companion)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The existing device boot chain supplies the kernel. This stage mirrors
+  # Fedora's kernel component stage by resolving and handing off its exact
+  # verified module artifact; it does not build or flash a kernel.
+  prepare_kernel_modules:
+    needs: plan
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out release tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install kernel RPM extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes cpio rpm
+
+      - name: Download and verify the public X810 Fedora kernel RPM
+        run: |
+          set -euo pipefail
+          python3 tools/fetch-x810-kernel.py --receipt cache/public-kernel/kernel.json
+          python3 tools/fetch-x810-kernel.py --receipt cache/public-kernel/kernel.json --verify-prepared
+          mkdir -p _ci/kernel
+          cp cache/public-kernel/kernel.json _ci/kernel/kernel.json
+          tar -C cache/public-kernel/usr/lib/modules -czf _ci/kernel/modules.tar.gz "$KVER"
+          (cd _ci/kernel && sha256sum kernel.json modules.tar.gz > SHA256SUMS)
+
+      - name: Hand the verified module artifact to the rootfs job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
+        with:
+          name: x810-arch-kernel-modules
+          path: _ci/kernel/
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  resolve_rootfs:
+    needs: [plan, build_port_update, prepare_kernel_modules]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      needs.build_port_update.result == 'success' &&
+      needs.prepare_kernel_modules.result == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      rootfs_key: ${{ steps.resolve.outputs.rootfs_key }}
+      rootfs_tag: ${{ steps.resolve.outputs.rootfs_tag }}
+      build_rootfs: ${{ steps.resolve.outputs.build_rootfs }}
+    steps:
+      - name: Check out sources for release input verification
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download the independently built Arch package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
+        with:
+          name: x810-arch-packages
+          path: _ci/packages
+
+      - name: Download the verified X810 kernel module artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
+        with:
+          name: x810-arch-kernel-modules
+          path: _ci/kernel
+
+      - name: Verify artifacts and resolve rootfs build identity
+        id: resolve
+        env:
+          RELEASE_TAG: ${{ needs.plan.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          (cd _ci/packages && sha256sum --check SHA256SUMS)
+          (cd _ci/kernel && sha256sum --check SHA256SUMS)
+          [[ "$(find _ci/packages -maxdepth 1 -type f -name '*.pkg.tar.zst' | wc -l)" -eq 3 ]]
+          python3 - _ci/kernel/kernel.json <<'PY'
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          receipt = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          if (receipt.get("schema_version") != 1
+                  or receipt.get("repository") != "iamSlightlyWind/x810-fedroid"
+                  or receipt.get("kernel_release") != "7.2.0-gts9wifi"
+                  or not re.fullmatch(r"[0-9a-f]{40,64}", str(receipt.get("source_commit", "")))):
+              raise SystemExit("kernel input receipt does not identify a verified X810 Fedora release")
+          if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("kernel_rpm", {}).get("sha256", ""))):
+              raise SystemExit("kernel RPM digest is missing from the receipt")
+          if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("modules", {}).get("sha256", ""))):
+              raise SystemExit("kernel module digest is missing from the receipt")
+          PY
+          package_digest="$(cd _ci/packages && sha256sum ./*.pkg.tar.zst | sha256sum | awk '{print $1}')"
+          kernel_receipt_digest="$(sha256sum _ci/kernel/kernel.json | awk '{print $1}')"
+          bootstrap_lock_digest="$(sha256sum docs/ALARM-ROOTFS.lock | awk '{print $1}')"
+          rootfs_key="$(printf '%s\n%s\n%s\n%s\n' "$SOURCE_COMMIT" "$package_digest" "$kernel_receipt_digest" "$bootstrap_lock_digest" | sha256sum | awk '{print $1}')"
+          [[ "$rootfs_key" =~ ^[0-9a-f]{64}$ ]]
+          echo "rootfs_key=$rootfs_key" >> "$GITHUB_OUTPUT"
+          echo "rootfs_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "build_rootfs=true" >> "$GITHUB_OUTPUT"
+          kernel_tag="$(python3 -c 'import json; print(json.load(open("_ci/kernel/kernel.json", encoding="utf-8"))["release_tag"])')"
+          {
+            echo "### Resolved Arch rootfs inputs"
+            echo "- Rootfs key: `$rootfs_key` (source, package archives, kernel receipt and signed bootstrap lock; rolling repository transaction is intentionally not claimed reproducible)."
+            echo "- Rootfs action: **build** `$RELEASE_TAG`."
+            echo "- Matching X810 kernel modules: `$kernel_tag`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  build_rootfs:
+    needs: [plan, build_port_update, prepare_kernel_modules, resolve_rootfs]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      needs.build_port_update.result == 'success' &&
+      needs.prepare_kernel_modules.result == 'success' &&
+      needs.resolve_rootfs.result == 'success' &&
+      needs.resolve_rootfs.outputs.build_rootfs == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      PODMAN_ROOT_OVERRIDE: /tmp/x810-arch-rootfs-root
+      PODMAN_RUNROOT_OVERRIDE: /tmp/x810-arch-rootfs-run
+      X810_RELEASE_TAG: ${{ needs.resolve_rootfs.outputs.rootfs_tag }}
+      X810_BUILD_INPUTS_KEY: ${{ needs.resolve_rootfs.outputs.rootfs_key }}
+      X810_PREBUILT_PACKAGES: "1"
+      X810_PREBUILT_KERNEL_MODULES: "1"
+    steps:
+      - name: Check out rootfs sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install rootfs build tools
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes podman zstd gnupg cpio rpm
           command -v rpm2cpio
 
+      - name: Download verified Arch package artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
+        with:
+          name: x810-arch-packages
+          path: _ci/packages
+
+      - name: Download the exact X810 kernel module artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
+        with:
+          name: x810-arch-kernel-modules
+          path: _ci/kernel
+
+      - name: Verify and stage upstream build artifacts
+        run: |
+          set -euo pipefail
+          (cd _ci/packages && sha256sum --check SHA256SUMS)
+          (cd _ci/kernel && sha256sum --check SHA256SUMS)
+          mkdir -p out/packages cache/public-kernel/usr/lib/modules
+          cp -- _ci/packages/*.pkg.tar.zst out/packages/
+          cp -- _ci/packages/SHA256SUMS out/packages/SHA256SUMS
+          cp -- _ci/kernel/kernel.json cache/public-kernel/kernel.json
+          tar -xzf _ci/kernel/modules.tar.gz -C cache/public-kernel/usr/lib/modules
+          python3 tools/fetch-x810-kernel.py --verify-prepared
+
       - name: Build and audit the complete Arch GNOME rootfs
         run: rootfs/build-rootfs.sh
 
-      - name: Publish one verified GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Checksum the verified rootfs release assets
         run: |
           set -euo pipefail
           test -s out/rootfs.tar.zst
           test -s out/manifest.json
           test -s out/SHA256SUMS
           (cd out && sha256sum --check SHA256SUMS)
-          gh release create "$X810_RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Windstation Arch rootfs build $GITHUB_RUN_NUMBER" \
-            --notes "Verified Arch Linux ARM GNOME/GDM rootfs for SM-X810. Built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. The installer downloads this release and verifies manifest.json before formatting linuxroot. No Android or boot partition is written." \
-            --latest \
-            out/rootfs.tar.zst out/manifest.json out/SHA256SUMS
+
+      - name: Hand the rootfs release set to the aggregate publisher
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
+        with:
+          name: x810-arch-rootfs
+          path: |
+            out/rootfs.tar.zst
+            out/manifest.json
+            out/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish_full_set:
+    needs: [plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs]
+    if: >-
+      always() && needs.plan.result == 'success' &&
+      needs.build_port_update.result == 'success' &&
+      needs.prepare_kernel_modules.result == 'success' &&
+      needs.resolve_rootfs.result == 'success' &&
+      needs.build_rootfs.result == 'success' &&
+      needs.resolve_rootfs.outputs.build_rootfs == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Check out release assembly and verification tools
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install rootfs archive verification tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zstd
+
+      - name: Download the rootfs artifact from this workflow run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
+        with:
+          name: x810-arch-rootfs
+          path: _ci/release
+
+      - name: Download the updater ZIP from this workflow run
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
+        with:
+          name: x810-port-update
+          path: _ci/update
+
+      - name: Validate, assemble, and publish the complete Arch release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REL: ${{ needs.plan.outputs.release_tag }}
+          EXPECTED_INPUT_KEY: ${{ needs.resolve_rootfs.outputs.rootfs_key }}
+          SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
+          SOURCE_BRANCH: ${{ needs.plan.outputs.branch }}
+          PORT_VERSION: ${{ needs.plan.outputs.port_version }}
+          PUBLICATION_RUN_ID: ${{ needs.plan.outputs.publication_run_id }}
+          PUBLICATION_RUN_NUMBER: ${{ needs.plan.outputs.publication_run_number }}
+          PORT_UPDATE_ZIP: _ci/update/update.zip
+        run: bash tools/publish-arch-full-set.sh
+
+  prune_old_releases:
+    needs: [publication_identity, plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs, publish_full_set]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Keep only the newest complete aggregate release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH_RESULT: ${{ needs.publish_full_set.result }}
+          EXPECTED_LATEST_TAG: ${{ needs.plan.outputs.release_tag }}
+          PORT_RELEASE_TAG: x810-arch-build-${{ needs.publication_identity.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+          if [[ "$PUBLISH_RESULT" == success ]]; then
+            [[ -n "$latest_tag" && "$latest_tag" == "$EXPECTED_LATEST_TAG" ]] || {
+              echo "REFUSING to prune: latest is '$latest_tag', expected complete release '$EXPECTED_LATEST_TAG'." >&2
+              exit 1
+            }
+            asset_names="$(gh release view "$latest_tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name]')"
+            python3 - "$asset_names" <<'PY'
+          import json
+          import sys
+
+          names = set(json.loads(sys.argv[1]))
+          required = {"rootfs.tar.zst", "manifest.json", "SHA256SUMS", "update.zip"}
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit("REFUSING to prune: latest aggregate is incomplete: " + ", ".join(missing))
+          PY
+            echo "Validated complete Arch release $latest_tag; removing superseded Arch releases."
+            tags="$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --json tagName --jq '.[].tagName')"
+            while IFS= read -r tag; do
+              [[ "$tag" == x810-arch-build-* && "$tag" != "$latest_tag" ]] || continue
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            done <<< "$tags"
+          else
+            echo "Arch publication did not succeed; preserving the previous complete release."
+            if [[ "$EVENT_NAME" == push && "$PORT_RELEASE_TAG" != "$latest_tag" ]] && gh release view "$PORT_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              gh release delete "$PORT_RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+            fi
+          fi
