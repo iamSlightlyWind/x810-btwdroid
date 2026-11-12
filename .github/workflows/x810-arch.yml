@@ -23,11 +23,6 @@ on:
       - ".gitignore"
       - ".github/workflows/x810-arch.yml"
   workflow_dispatch:
-    inputs:
-      build_packages:
-        description: "Build the local AArch64 Arch packages (no rootfs/device access)"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -82,10 +77,13 @@ jobs:
           python3 tools/test-tab-companion-overlay.py
 
   build_packages:
-    if: github.event_name == 'workflow_dispatch' && inputs.build_packages == true
     needs: test
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      # Older Podman versions reject a runroot longer than 50 characters;
+      # the checkout path under /home/runner/work exceeds that limit.
+      PODMAN_RUNROOT_OVERRIDE: /tmp/x810-btwdroid-podman-run
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
