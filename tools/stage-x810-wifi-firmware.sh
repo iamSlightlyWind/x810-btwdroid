@@ -28,13 +28,15 @@ case "$rootfs" in
 esac
 
 bdftool="$script_dir/bdftool.py"
+# Hash the upstream source body after the three local attribution/license
+# lines; the parser implementation itself must remain byte-for-byte pinned.
 bdftool_sha256="c2f851d7d9700fca7df41df19d291122877c6008e22722250f68fddbe72e4cc7"
 [[ -f "$bdftool" ]] || die "missing vendored BDF parser: $bdftool"
 command -v python3 >/dev/null 2>&1 || die "python3 is required"
 command -v sha256sum >/dev/null 2>&1 || die "sha256sum is required"
 command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v awk >/dev/null 2>&1 || die "awk is required"
-[[ "$(sha256sum -- "$bdftool" | awk '{print $1}')" == "$bdftool_sha256" ]] \
+[[ "$(tail -n +4 -- "$bdftool" | sha256sum | awk '{print $1}')" == "$bdftool_sha256" ]] \
     || die "vendored bdftool.py differs from the pinned upstream version; review and update this script's pin"
 
 fw_rel="usr/lib/firmware/ath11k/WCN6855/hw2.1"
