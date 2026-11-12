@@ -36,6 +36,17 @@ else
   python3 "$tools/fetch-x810-kernel.py"
 fi
 "$tools/upgrade-rootfs.sh" networkmanager wpa_supplicant openssh sudo zram-generator
+# ALARM's generic bootstrap includes its own kernel. Windstation keeps the
+# existing Android/X810 boot chain, so remove that package after the initial
+# full upgrade and before staging the matching X810 module tree. Keep shared
+# dependencies; this is intentionally not -Rns.
+if "$tools/pacman-target.sh" --builder-mode -Q linux-aarch64 >/dev/null 2>&1; then
+  echo "Removing generic linux-aarch64; Windstation uses its existing X810 boot chain."
+  "$tools/pacman-target.sh" --builder-mode -R --noconfirm linux-aarch64
+fi
+if "$tools/pacman-target.sh" --builder-mode -Q linux-aarch64 >/dev/null 2>&1; then
+  die "generic linux-aarch64 remains installed; refusing to build a rootfs for the external X810 boot chain"
+fi
 "$tools/stage-x810-modules.sh"
 "$tools/stage-x810-wifi.sh"
 "$tools/configure-ssh-rootfs.sh"

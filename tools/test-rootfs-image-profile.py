@@ -80,6 +80,16 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn("verify-rootfs-archive.py", installer)
         self.assertIn("format only", installer.lower())
 
+    def test_build_removes_generic_kernel_before_staging_x810_modules(self):
+        script = (TOOLS.parent / "rootfs/build-rootfs.sh").read_text(encoding="utf-8")
+        upgrade = script.index('"$tools/upgrade-rootfs.sh" networkmanager')
+        removal = script.index('"$tools/pacman-target.sh" --builder-mode -R --noconfirm linux-aarch64')
+        stage = script.index('"$tools/stage-x810-modules.sh"')
+        self.assertLess(upgrade, removal)
+        self.assertLess(removal, stage)
+        self.assertIn('die "generic linux-aarch64 remains installed', script)
+        self.assertNotIn('-Rns --noconfirm linux-aarch64', script)
+
     def test_archive_requires_gnome_gdm_and_tab_companion_package_records(self):
         self.assertEqual(
             verifier.REQUIRED_PROFILE_PACKAGES,
