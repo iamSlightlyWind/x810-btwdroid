@@ -43,7 +43,7 @@ class ArchiveFixture:
                  omit_graphical_display_manager_wants: bool = False,
                  optional_app: str | None = None,
                  arch_dualboot_backend: bool = True,
-                 private_credentials: bool = False) -> None:
+                 private_credentials: bool | str = False) -> None:
         self.missing_package = missing_package
         self.syscall_sandbox_disabled = syscall_sandbox_disabled
         self.plaintext_shadow = plaintext_shadow
@@ -120,7 +120,9 @@ class ArchiveFixture:
             self.add_file(archive, "etc/ssh/sshd_config.d/90-windstation.conf",
                           b"PasswordAuthentication yes\nPermitRootLogin no\n")
             if self.private_credentials:
-                self.add_file(archive, "home/alarm/.ssh/authorized_keys", b"ssh-ed25519 test\n",
+                private_path = (self.private_credentials if isinstance(self.private_credentials, str)
+                                else "home/alarm/.ssh/authorized_keys")
+                self.add_file(archive, private_path, b"private test state\n",
                               mode=0o600, uid=1000, gid=1000)
             self.add_file(archive, "usr/lib/modules/7.2.0-gts9wifi/modules.dep", b"# synthetic modules index\n")
             self.add_file(archive, "usr/lib/firmware/ath11k/WCN6855/hw2.1/board-2.bin", b"synthetic board data\n")
@@ -262,9 +264,24 @@ class VerifyRootfsArchiveIntegrationTests(unittest.TestCase):
         self.assertNotIn("plaintext", result.stdout + result.stderr)
 
     def test_rejects_embedded_ssh_credentials(self):
-        result = self.run_verifier(ArchiveFixture(private_credentials=True))
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("private SSH or Tailscale state", result.stderr)
+        private_paths = (
+            "home/alarm/.ssh/authorized_keys",
+            "etc/ssh/ssh_host_rsa_key",
+            "var/lib/tailscale/tailscaled.state",
+            "etc/wpa_supplicant/wpa_supplicant.conf",
+            "etc/NetworkManager/system-connections/old.nmconnection",
+        )
+        for path in private_paths:
+            with self.subTest(path=path):
+                result = self.run_verifier(ArchiveFixture(private_credentials=path))
+                self.assertNotEqual(result.returncode, 0)
+                expected_failure = (
+                    "saved NetworkManager credentials" if path.startswith("etc/NetworkManager/")
+                    else "saved Wi-Fi credentials" if path.endswith("wpa_supplicant.conf")
+                    else "Tailscale state" if path.startswith("var/lib/tailscale/")
+                    else "SSH credential material"
+                )
+                self.assertIn(expected_failure, result.stderr)
 
 
 if __name__ == "__main__":

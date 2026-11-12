@@ -197,16 +197,16 @@ def verify_archive(path: pathlib.Path,
                 # public release. Only filenames are examined; file values
                 # are never printed.
                 lower = normalized.lower()
-                forbidden = (
-                    lower.endswith("/authorized_keys")
-                    or "/.ssh" in lower
-                    or "/ssh_host_" in lower
-                    or lower.startswith("var/lib/tailscale/")
-                    or lower.endswith("/wpa_supplicant.conf")
-                    or lower.startswith("etc/NetworkManager/system-connections/") and member.isfile()
-                )
-                if forbidden:
-                    raise ValueError("public rootfs contains private SSH or Tailscale state")
+                if (lower.endswith("/authorized_keys") or "/.ssh" in lower
+                        or "/ssh_host_" in lower):
+                    raise ValueError("public rootfs contains SSH credential material")
+                if lower.startswith("var/lib/tailscale/"):
+                    raise ValueError("public rootfs contains Tailscale state")
+                if lower.endswith("/wpa_supplicant.conf"):
+                    raise ValueError("public rootfs contains saved Wi-Fi credentials")
+                if (lower.startswith("etc/NetworkManager/system-connections/")
+                        and member.isfile()):
+                    raise ValueError("public rootfs contains saved NetworkManager credentials")
                 if normalized.startswith("etc/NetworkManager/system-connections/") and member.isfile():
                     nm_profile_count += 1
                 if normalized == "run":

@@ -130,15 +130,9 @@ desktop_packages=(
 [[ -s "$rootfs/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json" ]] \
     || die "Arch dualboot extension metadata was not installed"
 
-# Keep the image to the shell/session/settings core, not standalone
-# applications selected by the broad `gnome` group. This also cleans up an
-# existing staged tree produced by an older profile draft.
-excluded_optional_apps=(gnome-console gnome-boxes gnome-books)
-for package in "${excluded_optional_apps[@]}"; do
-    if "$script_dir/pacman-target.sh" --builder-mode -Q "$package" >/dev/null 2>&1; then
-        "$script_dir/pacman-target.sh" --builder-mode -Rns --noconfirm "$package"
-    fi
-done
+# Keep the clean image to the shell/session/settings core, not standalone
+# applications selected by the broad `gnome` group. Never repair an old staged
+# install here; the build entry point starts from the signed ALARM archive.
 
 "$script_dir/configure-target-pacman.py" --check "$pacman_conf"
 
@@ -198,9 +192,9 @@ pacman_disable_sandbox_syscalls=no
 EOF
 chmod 0644 "$rootfs/etc/windstation-arch-profile"
 
-# Package hooks can create or expose home trees after first-boot provisioning.
-# Scrub again using PRoot's fake-root view of the target tree.
-"$script_dir/scrub-rootfs-ssh.sh"
+# Package hooks can create or expose credentials after the initial SSH setup.
+# Scrub all release-private state using PRoot's fake-root view of the target.
+"$script_dir/scrub-rootfs-private-state.sh"
 
 "$script_dir/audit-rootfs.sh"
 

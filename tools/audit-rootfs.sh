@@ -19,6 +19,8 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     release=7.2.0-gts9wifi
     target() { /opt/proot/src/proot -0 -q /usr/bin/qemu-aarch64-static \
       -r "$rootfs" -w / -b /dev -b /proc -b /sys -b /tmp "$@"; }
+    target_tree() { /opt/proot/src/proot -0 -q /usr/bin/qemu-aarch64-static \
+      -r "$rootfs" -w / -b /dev -b /proc -b /sys "$@"; }
     audit_fail() { echo "Rootfs audit FAILED: $*" >&2; exit 1; }
     audit_check() {
       local label="$1"
@@ -35,13 +37,20 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
         target /usr/bin/passwd -S alarm | grep -q "^alarm L "
       fi
     }
-    no_home_ssh_dirs() {
+    no_private_ssh_wifi_paths() {
       local found
-      found="$(target /usr/bin/find /home /root -mindepth 1 -name .ssh\* -print -quit)"
+      found="$(target_tree /usr/bin/find / \
+        \( -path /dev -o -path /proc -o -path /sys \) -prune -o \
+        \( -iname ".ssh*" -o -iname "authorized_keys" \
+          -o -iname "*ssh_host_*" -o -iname "wpa_supplicant.conf" \) -print -quit)"
       if [[ -n "$found" ]]; then
-        echo "Unexpected SSH material remains in the public image: $found" >&2
+        echo "Private SSH or Wi-Fi credential path remains in target rootfs." >&2
         return 1
       fi
+    }
+    no_tailscale_state() {
+      [[ -z "$(target_tree /usr/bin/find /var/lib -mindepth 1 -maxdepth 1 \
+        -iname tailscale -print -quit)" ]]
     }
     no_extra_homes() {
       [[ -z "$(find "$rootfs/home" -mindepth 1 -maxdepth 1 ! -name alarm -print -quit 2>/dev/null)" ]]
@@ -49,9 +58,19 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     no_nm_profiles() {
       [[ -z "$(find "$rootfs/etc/NetworkManager/system-connections" -type f -print -quit 2>/dev/null)" ]]
     }
+    no_optional_apps() {
+      local package
+      for package in gnome-console gnome-boxes gnome-books; do
+        if target /usr/bin/pacman -Q "$package" >/dev/null 2>&1; then
+          echo "Optional GNOME application is installed: $package" >&2
+          return 1
+        fi
+      done
+    }
     audit_check "target pacman database is readable" target /usr/bin/pacman -Q
     audit_check "base packages are installed" target /usr/bin/pacman -Q \
       x810-device-support networkmanager wpa_supplicant openssh sudo zram-generator
+    audit_check "optional GNOME applications are absent" no_optional_apps
     audit_check "GNOME, browser, Bluetooth, and Tab Companion packages are installed" \
       target /usr/bin/pacman -Q gdm gnome-shell gnome-session gnome-control-center \
       gnome-terminal brave-bin bluez bluez-utils pipewire-jack noto-fonts tab-companion
@@ -78,11 +97,9 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
       test -f "$rootfs/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json"
     audit_check "root account is locked" root_is_locked
     audit_check "ALARM seed password is locked when present" alarm_is_locked_if_present
-    audit_check "Tailscale device state is absent" test ! -e "$rootfs/var/lib/tailscale/tailscaled.state"
-    audit_check "SSH host private key is absent" test ! -e "$rootfs/etc/ssh/ssh_host_ed25519_key"
+    audit_check "Tailscale device state is absent" no_tailscale_state
+    audit_check "SSH and Wi-Fi credential paths are absent throughout rootfs" no_private_ssh_wifi_paths
     audit_check "NetworkManager saved profiles are absent" no_nm_profiles
-    audit_check "wpa_supplicant saved credentials are absent" test ! -e "$rootfs/etc/wpa_supplicant/wpa_supplicant.conf"
-    audit_check "SSH directories and keys are absent from homes" no_home_ssh_dirs
     audit_check "no non-installer user home is included" no_extra_homes
     audit_check "password SSH is configured" grep -Fxq PasswordAuthentication\ yes "$rootfs/etc/ssh/sshd_config.d/90-windstation.conf"
     audit_check "root SSH login is disabled" grep -Fxq PermitRootLogin\ no "$rootfs/etc/ssh/sshd_config.d/90-windstation.conf"

@@ -32,7 +32,7 @@ class RootfsImageProfileTests(unittest.TestCase):
         for helper in (
             "tools/configure-ssh-rootfs.sh",
             "tools/audit-rootfs.sh",
-            "tools/scrub-rootfs-ssh.sh",
+            "tools/scrub-rootfs-private-state.sh",
             "tools/package-rootfs.sh",
         ):
             self.assertTrue(os.access(project / helper, os.X_OK), f"{helper} must be executable")
@@ -143,16 +143,20 @@ class RootfsImageProfileTests(unittest.TestCase):
                        "wpa_supplicant.conf", "/var/lib/tailscale"):
             self.assertIn(marker, configure)
         self.assertIn("No private Wi-Fi, SSH, account, or Tailscale state", configure)
-        self.assertIn(r"-name .ssh\*", audit)
         self.assertIn('target /usr/bin/find /home /root -mindepth 1 -name .ssh\\*', configure)
-        self.assertIn('target /usr/bin/find /home /root -mindepth 1 -name .ssh\\*', audit)
+        self.assertIn('no_private_ssh_wifi_paths()', audit)
         self.assertIn("-name alarm", audit)
         profile = (TOOLS / "install-gnome-profile.sh").read_text(encoding="utf-8")
-        self.assertIn('"$script_dir/scrub-rootfs-ssh.sh"', profile)
-        self.assertIn("Unexpected SSH material remains in the public image", audit)
-        scrub = (TOOLS / "scrub-rootfs-ssh.sh").read_text(encoding="utf-8")
-        self.assertIn('target /usr/bin/find /home /root -mindepth 1 -name ".ssh*"', scrub)
-        self.assertIn("Unexpected SSH material remains in target home", scrub)
+        self.assertIn('"$script_dir/scrub-rootfs-private-state.sh"', profile)
+        self.assertIn("Private SSH or Wi-Fi credential path remains in target rootfs", audit)
+        scrub = (TOOLS / "scrub-rootfs-private-state.sh").read_text(encoding="utf-8")
+        for marker in ('-iname ".ssh*"', '-iname "authorized_keys"',
+                       '-iname "*ssh_host_*"', '-iname "wpa_supplicant.conf"',
+                       'rm -rf -- /var/lib/tailscale',
+                       '/etc/NetworkManager/system-connections'):
+            self.assertIn(marker, scrub)
+        self.assertIn('target /usr/bin/find / \\', scrub)
+        self.assertIn("Private SSH, Wi-Fi, or Tailscale state remains", scrub)
 
     def test_pacman_policy_disables_only_filesystem_sandbox(self):
         text = "[options]\nDisableSandboxFilesystem\n#DisableSandboxSyscalls\n[core]\n"
@@ -207,7 +211,7 @@ class RootfsImageProfileTests(unittest.TestCase):
         package_block = script.split("desktop_packages=(", 1)[1].split(")", 1)[0]
         for optional_app in ("gnome-console", "gnome-boxes", "gnome-books"):
             self.assertNotIn(optional_app, package_block)
-        self.assertIn("excluded_optional_apps=(gnome-console gnome-boxes gnome-books)", script)
+        self.assertNotIn("excluded_optional_apps", script)
         self.assertIn("gnome-control-center", script)
         self.assertIn("pipewire-jack", script)
         self.assertIn("noto-fonts", script)
@@ -256,8 +260,8 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn('target() { "${proot[@]}" "$@"; }', inner_script)
         self.assertIn("target /usr/bin/ssh-keygen -A", inner_script)
 
-    def test_ssh_scrub_container_script_does_not_break_outer_single_quote(self):
-        scrub = (TOOLS / "scrub-rootfs-ssh.sh").read_text(encoding="utf-8")
+    def test_private_state_scrub_container_script_does_not_break_outer_single_quote(self):
+        scrub = (TOOLS / "scrub-rootfs-private-state.sh").read_text(encoding="utf-8")
         marker = '"$image" -lc \'\n'
         self.assertIn(marker, scrub)
         inner_script = scrub.split(marker, 1)[1].rsplit("\n  '\n", 1)[0]
