@@ -17,6 +17,14 @@ SPEC.loader.exec_module(policy)
 
 
 class TargetPacmanPolicyTests(unittest.TestCase):
+    def test_upgrade_initializes_trust_before_first_signed_transaction(self):
+        upgrade = Path(__file__).with_name("upgrade-rootfs.sh").read_text(encoding="utf-8")
+        initial_keyring = upgrade.index('"$script_dir/init-target-keyring.sh"')
+        first_upgrade = upgrade.index('"$script_dir/pacman-target.sh" --builder-mode -Syu')
+        keyring_refresh = upgrade.rindex('"$script_dir/init-target-keyring.sh"')
+        self.assertLess(initial_keyring, first_upgrade)
+        self.assertGreater(keyring_refresh, first_upgrade)
+
     def test_adds_filesystem_workaround_only_to_options(self):
         source = "[options]\n#DisableSandboxFilesystem\n#DisableSandboxSyscalls\n[core]\nServer = example\n"
         result = policy.ensure_target_policy(source)

@@ -15,6 +15,10 @@ script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
     exit 1
 }
 
+# The bootstrap has the keyring package files but no initialized trustdb.
+# Populate its trust keys before the first signature-checked transaction.
+"$script_dir/init-target-keyring.sh"
+
 "$script_dir/pacman-target.sh" --builder-mode -Syu --needed --noconfirm \
   --ignore archlinux-keyring "$@"
 "$script_dir/pacman-target.sh" --builder-mode -S --needed --noconfirm --noscriptlet archlinux-keyring
