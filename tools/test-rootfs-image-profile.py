@@ -218,6 +218,15 @@ class RootfsImageProfileTests(unittest.TestCase):
         inner_script = audit.split(marker, 1)[1].rsplit("\n  '\n", 1)[0]
         self.assertNotIn("'", inner_script)
 
+    def test_ssh_configuration_container_script_does_not_break_outer_single_quote(self):
+        configure = (TOOLS / "configure-ssh-rootfs.sh").read_text(encoding="utf-8")
+        marker = '"$image" -lc \'\n'
+        self.assertIn(marker, configure)
+        inner_script = configure.split(marker, 1)[1].rsplit("\n  '\n", 1)[0]
+        self.assertNotIn("'", inner_script)
+        self.assertIn('target() { "${proot[@]}" "$@"; }', inner_script)
+        self.assertIn("target /usr/bin/ssh-keygen -A", inner_script)
+
     def test_builder_failure_leaves_target_pacman_conf_unchanged(self):
         with tempfile.TemporaryDirectory() as temporary:
             temp = Path(temporary)

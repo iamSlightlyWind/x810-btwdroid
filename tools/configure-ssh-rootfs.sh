@@ -100,7 +100,7 @@ EOF
       systemd-resolved.service >/dev/null
     systemctl --root="$rootfs" disable NetworkManager-wait-online.service >/dev/null 2>&1 || true
 
-    # Generate throw-away keys only to validate sshd's effective config, then
+    # Generate throw-away keys only to validate sshd configuration, then
     # remove them so the first boot creates device-unique host keys.
     target /usr/bin/ssh-keygen -A
     target /usr/bin/sshd -t -f /etc/ssh/sshd_config
