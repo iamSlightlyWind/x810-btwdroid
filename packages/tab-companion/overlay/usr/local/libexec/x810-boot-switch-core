@@ -1,0 +1,238 @@
+#!/usr/bin/python3
+"""Tab Companion Fedora/X810 backend: write only the 4 boot-set partitions."""
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+
+BASE = pathlib.Path('/var/lib/x810-boot-sets')
+PARTS = {'boot': 100663296, 'init_boot': 8388608,
+         'vendor_boot': 100663296, 'dtbo': 16777216}
+BLOCKS = pathlib.Path('/dev/disk/by-partlabel')
+EXPECTED = {
+    'boot': '/dev/sda21', 'init_boot': '/dev/sda22',
+    'vendor_boot': '/dev/sda24', 'dtbo': '/dev/sda30',
+}
+MODEL_NODE = pathlib.Path('/proc/device-tree/model')
+COMPATIBLE_NODE = pathlib.Path('/proc/device-tree/compatible')
+
+
+def is_x810_device(model, compatible):
+    """Check board identity using the DT compatible list, not the display name.
+
+    The live SM-X810 FDT reports the human-readable model ``Samsung Galaxy
+    Tab S9+ Wi-Fi``; unlike the recovery/vendor name, it does not contain the
+    internal ``GTS9PWIFI`` codename.  The compatible list does contain the
+    board-specific ``samsung,gts9pwifi`` entry and is the authoritative gate.
+    """
+    entries = set(compatible.replace('\0', ' ').split())
+    return 'samsung,gts9pwifi' in entries or 'GTS9PWIFI' in model.upper()
+
+def emit(message):
+    print(message, flush=True)
+
+def device_path(part):
+    p = BLOCKS / part
+    if not p.exists() or os.path.realpath(p) != EXPECTED[part]:
+        raise RuntimeError(f'{part}: unexpected/missing by-partlabel device')
+    actual = subprocess.check_output(['blockdev', '--getsize64', str(p)], text=True).strip()
+    if int(actual) != PARTS[part]:
+        raise RuntimeError(f'{part}: partition is {actual} bytes, expected {PARTS[part]}')
+    return p
+
+def validate_device():
+    try:
+        model = MODEL_NODE.read_bytes().rstrip(b'\0').decode()
+    except OSError:
+        model = ''
+    try:
+        compatible = COMPATIBLE_NODE.read_bytes().decode(errors='replace')
+    except OSError:
+        compatible = ''
+    if not is_x810_device(model, compatible):
+        shown_compatible = compatible.replace('\0', ', ').strip(', ') or 'unavailable'
+        raise RuntimeError(
+            'Not the expected SM-X810-family board '
+            f'(model={model or "unknown"}; compatible={shown_compatible})')
+    root = subprocess.check_output(['findmnt', '-n', '-o', 'SOURCE', '/'], text=True).strip()
+    if os.path.realpath(root) != '/dev/sda35':
+        raise RuntimeError(f'Linux root is {root}, not the expected linuxroot /dev/sda35')
+    for p in PARTS:
+        device_path(p)
+
+def validate_images(name):
+    """Check image presence and partition-sized length, not fixed fingerprints.
+
+    Android boot images are commonly changed by Magisk, custom kernels, and
+    recovery repacking. Those user-selected bytes must not be rejected because
+    they differ from a stale SHA-256 recorded when the set was first staged.
+    """
+    for part, size in PARTS.items():
+        image = BASE / name / f'{part}.img'
+        if not image.is_file() or image.stat().st_size != size:
+            raise RuntimeError(f'{name}/{part}: missing or wrong-size image')
+    return True
+
+def read_os_release_id():
+    try:
+        for line in pathlib.Path('/etc/os-release').read_text(encoding='utf-8').splitlines():
+            if line.startswith('ID='):
+                return line.partition('=')[2].strip().strip('"').lower()
+    except OSError:
+        pass
+    return ''
+
+def read_os_release_pretty_name():
+    try:
+        for line in pathlib.Path('/etc/os-release').read_text(encoding='utf-8').splitlines():
+            if line.startswith('PRETTY_NAME='):
+                return line.partition('=')[2].strip().strip('"')[:120]
+    except OSError:
+        pass
+    return ''
+
+def current_system():
+    """Return the stable Linux-set ID used by both Linux and Android clients.
+
+    ``fedora`` is the legacy on-disk set ID seeded by the Android-side port.
+    Keep it as the interop ID while the displayed label identifies the actual
+    Linux distro.  The exact X810 board and linuxroot checks still gate access.
+    """
+    return 'fedora' if read_os_release_id() in ('fedora', 'archarm') else 'mixed/unknown'
+
+def snapshot_current_linux():
+    """Copy the live Linux boot set into linuxroot before switching away.
+
+    This deliberately does not inspect image signatures or compare hashes:
+    it preserves the exact four bytesets currently running, including local
+    kernel/boot customizations. The `fedora` directory name is retained for
+    compatibility with the Android-side selector; name.txt records the real
+    running distro. Device identity and partition geometry remain checked by
+    validate_device() before this function is called.
+    """
+    BASE.mkdir(parents=True, exist_ok=True)
+    stage = BASE / '.fedora-snapshot-pending'
+    destination = BASE / 'fedora'
+    previous = BASE / '.fedora-snapshot-previous'
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir(mode=0o700)
+    try:
+        for part, size in PARTS.items():
+            source = device_path(part)
+            target = stage / f'{part}.img'
+            copied = 0
+            with open(source, 'rb', buffering=0) as src, open(target, 'wb', buffering=0) as dst:
+                while copied < size:
+                    block = src.read(min(4 * 1024 * 1024, size - copied))
+                    if not block:
+                        raise RuntimeError(f'{part}: short read while saving the current boot image')
+                    dst.write(block)
+                    copied += len(block)
+                dst.flush()
+                os.fsync(dst.fileno())
+            emit(f'Saved current {part} to shared Linuxroot storage')
+        label = read_os_release_pretty_name() or 'Linux'
+        (stage / 'name.txt').write_text(label + '\n', encoding='utf-8')
+        dir_fd = os.open(stage, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+        shutil.rmtree(previous, ignore_errors=True)
+        if destination.exists():
+            os.replace(destination, previous)
+        try:
+            os.replace(stage, destination)
+        except Exception:
+            if not destination.exists() and previous.exists():
+                os.replace(previous, destination)
+            raise
+        shutil.rmtree(previous, ignore_errors=True)
+        parent_fd = os.open(BASE, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+        try:
+            os.fsync(parent_fd)
+        finally:
+            os.close(parent_fd)
+    except Exception:
+        shutil.rmtree(stage, ignore_errors=True)
+        raise
+
+def same_bytes(source, target, size):
+    """Verify a completed raw write by direct comparison, without a digest."""
+    with open(source, 'rb', buffering=0) as src, open(target, 'rb', buffering=0) as dst:
+        remaining = size
+        while remaining:
+            count = min(4 * 1024 * 1024, remaining)
+            left, right = src.read(count), dst.read(count)
+            if len(left) != count or len(right) != count or left != right:
+                return False
+            remaining -= count
+        return not src.read(1)
+
+def status():
+    ready = {}
+    errors = {}
+    for name in ('fedora', 'android'):
+        try:
+            validate_images(name)
+            ready[name] = True
+        except Exception as error:
+            ready[name] = False
+            errors[name] = str(error)
+    current = current_system()
+    result = {'current': current, 'ready': ready, 'errors': errors}
+    if current == 'fedora':
+        label = read_os_release_pretty_name()
+        if label:
+            result['current_label'] = label
+    print(json.dumps(result, sort_keys=True))
+
+def stage(name):
+    if name not in ('fedora', 'android'):
+        raise RuntimeError('Choose android or fedora')
+    validate_device()
+    validate_images(name)
+    if name == 'android':
+        if current_system() != 'fedora':
+            raise RuntimeError('Cannot save the active Linux boot set: expected Fedora or Arch Linux ARM on linuxroot')
+        # Android still expects the original `fedora` set ID; the name file
+        # records the actual Linux distro. Both clients use linuxroot storage.
+        snapshot_current_linux()
+    for part, size in PARTS.items():
+        image = BASE / name / f'{part}.img'
+        dest = device_path(part)
+        emit(f'Writing and checking {part}…')
+        with open(image, 'rb', buffering=0) as src, open(dest, 'wb', buffering=0) as out:
+            while True:
+                block = src.read(4 * 1024 * 1024)
+                if not block:
+                    break
+                out.write(block)
+            out.flush()
+            os.fsync(out.fileno())
+        os.sync()
+        if not same_bytes(image, dest, size):
+            raise RuntimeError(f'{part}: read-back differs from the selected image. Do NOT reboot; restage the Linux boot set.')
+        emit(f'{part}: verified')
+    emit(f'Complete: {name} boot set staged. Tablet was NOT rebooted.')
+
+def main():
+    if os.geteuid() != 0:
+        raise SystemExit('Run through pkexec; root is required for raw partition reads/writes.')
+    try:
+        if len(sys.argv) == 2 and sys.argv[1] == 'status':
+            validate_device(); status()
+        elif len(sys.argv) == 3 and sys.argv[1] == 'stage':
+            stage(sys.argv[2])
+        else:
+            raise RuntimeError('Usage: tab-companion-boot-switch status | stage android|fedora')
+    except Exception as e:
+        emit(f'ERROR: {e}')
+        return 1
+    return 0
+
+if __name__ == '__main__':
+    sys.exit(main())

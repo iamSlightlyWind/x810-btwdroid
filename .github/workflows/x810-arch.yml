@@ -1,0 +1,113 @@
+name: X810 BTWDroid CI and package build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "README.md"
+      - "LICENSE"
+      - "x810-build"
+      - "docs/**"
+      - "packages/**"
+      - "tools/**"
+      - ".gitignore"
+      - ".github/workflows/x810-arch.yml"
+  pull_request:
+    paths:
+      - "README.md"
+      - "LICENSE"
+      - "x810-build"
+      - "docs/**"
+      - "packages/**"
+      - "tools/**"
+      - ".gitignore"
+      - ".github/workflows/x810-arch.yml"
+  workflow_dispatch:
+    inputs:
+      build_packages:
+        description: "Build the local AArch64 Arch packages (no rootfs/device access)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: x810-btwdroid-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install archive test tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes zstd
+
+      - name: Verify local secrets and build outputs stay ignored
+        run: |
+          set -euo pipefail
+          for path in \
+            cache/ssh-authorized_keys \
+            cache/windstation-connectivity.tar.gz \
+            gnupg/private-keys-v1.d/example.key \
+            references/local-checkout \
+            work/rootfs/etc/shadow \
+            out/private-rootfs/rootfs.tar.zst \
+            out/packages/tab-companion-any.pkg.tar.zst \
+            docs/ARCH-ROOTFS-ARTIFACT.lock \
+            x810-install-backup-test/manifest.json \
+            tmp/ssh-known-hosts; do
+            git check-ignore -q "$path" || {
+              echo "Missing .gitignore coverage for: $path" >&2
+              exit 1
+            }
+          done
+
+      - name: Run installer, rootfs and package contracts
+        run: |
+          set -euo pipefail
+          bash -n tools/*.sh tools/x810-install x810-build
+          python3 -m compileall -q tools
+          python3 tools/test-x810-install.py
+          python3 tools/test-target-pacman-policy.py
+          python3 tools/test-rootfs-image-profile.py
+          python3 tools/test-verify-rootfs-archive.py
+          python3 tools/test-tab-companion-overlay.py
+
+  build_packages:
+    if: github.event_name == 'workflow_dispatch' && inputs.build_packages == true
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes podman
+
+      - name: Build AArch64 package artifacts
+        run: |
+          set -euo pipefail
+          tools/build-builder-image.sh
+          tools/build-packages.sh
+
+      - name: Upload packages for local rootfs staging
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: x810-btwdroid-packages
+          path: out/packages/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0

@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: MPL-2.0
+# Reproducible AArch64 adaptation of Brave's maintained brave-bin AUR recipe.
+pkgname=brave-bin
+pkgver=1.99.56
+pkgrel=1
+epoch=1
+pkgdesc='Web browser that blocks ads and trackers by default (binary release)'
+arch=('aarch64')
+url='https://brave.com'
+license=('MPL2' 'BSD' 'custom:chromium')
+depends=('alsa-lib' 'gtk3' 'libxss' 'nss' 'ttf-font')
+optdepends=('cups: printer support' 'libgnome-keyring: GNOME keyring support' 'libnotify: native notifications')
+provides=("${pkgname%-bin}=$pkgver" 'brave-browser')
+conflicts=("${pkgname%-bin}")
+options=(!strip)
+source=("$pkgname.sh" 'brave-browser.desktop')
+source_aarch64=("$pkgname-$pkgver-aarch64.zip::https://github.com/brave/brave-browser/releases/download/v$pkgver/brave-browser-$pkgver-linux-arm64.zip")
+noextract=("$pkgname-$pkgver-aarch64.zip")
+sha256sums=('75a87dd17b42fcc6f27adfd16c82bed1c08e9251b07d2012f8d49f7412fa1d00'
+            'c07276b69c7304981525ecb022f92daf7ae125a4fb05ac3442157b50826e257a')
+sha256sums_aarch64=('8c91f11c9a70d1ac8fd277dbf851d7e5e5daa02fd43edd442fce6e5ff301fe1d')
+
+prepare() {
+  mkdir -p brave
+  bsdtar -xf "$pkgname-$pkgver-aarch64.zip" -C brave
+  chmod +x brave/brave
+}
+
+package() {
+  install -dm0755 "$pkgdir/opt"
+  cp -a brave "$pkgdir/opt/$pkgname"
+  chmod 4755 "$pkgdir/opt/$pkgname/chrome-sandbox"
+  install -Dm0755 "$srcdir/$pkgname.sh" "$pkgdir/usr/bin/brave"
+  install -Dm0644 "$srcdir/brave-browser.desktop" "$pkgdir/usr/share/applications/brave-browser.desktop"
+  install -Dm0644 "$pkgdir/opt/$pkgname/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
+    install -Dm0644 "$pkgdir/opt/$pkgname/product_logo_${size/x*/}.png" \
+      "$pkgdir/usr/share/icons/hicolor/$size/apps/brave-desktop.png"
+  done
+}

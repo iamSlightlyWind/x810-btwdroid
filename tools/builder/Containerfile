@@ -1,0 +1,27 @@
+# x86_64 build environment for locally preparing the Arch ARM rootfs.
+# Keep all image layers in tmp via tools/build-builder-image.sh.
+FROM docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae
+
+ARG PROOT_COMMIT=25dc6a3134891f98a79f57ce1c2c1b23ff15cad1
+
+# Use one complete Arch transaction (not a partial -Sy install).
+RUN pacman -Syu --noconfirm --needed \
+      base-devel git pkgconf libarchive talloc qemu-user-static \
+ && rm -f /var/cache/pacman/pkg/* \
+ && rm -rf /var/lib/pacman/sync/*
+
+# Build Arch packages as a normal user; UID 1000 is mapped with --userns=keep-id.
+RUN useradd --create-home --uid 1000 --gid users --shell /usr/bin/bash builder
+
+# Build PRoot from its upstream pinned release commit. Keep the binary in this
+# Arch environment because it is dynamically linked to Arch's glibc/libtalloc.
+RUN git init /opt/proot \
+ && git -C /opt/proot remote add origin https://github.com/proot-me/proot.git \
+ && git -C /opt/proot fetch --depth=1 origin "${PROOT_COMMIT}" \
+ && git -C /opt/proot checkout --detach FETCH_HEAD \
+ && test "$(git -C /opt/proot rev-parse HEAD)" = "${PROOT_COMMIT}" \
+ && make -C /opt/proot/src loader.elf loader-m32.elf build.h \
+ && make -C /opt/proot/src proot
+
+WORKDIR /work
+ENTRYPOINT ["/usr/bin/bash"]

@@ -1,0 +1,8 @@
+source_repository=https://github.com/iamSlightlyWind/x810-fedroid
+source_commit=691763578b51f859f51568a6efa3946a7b366eb7
+source_thermal_helper=x810-fedroid/rootfs/overlay/usr/libexec/x810-thermal-limit
+source_thermal_helper_sha256=32f77f3488217d839261a383d5016dea655c384fcb6e78453924c1cbbf41ea26
+source_thermal_unit=x810-fedroid/rootfs/overlay/usr/lib/systemd/system/x810-thermal-limit.service
+source_thermal_unit_sha256=6ecc8baa04a59683c14de8f7f9407be9b807f1873c48a197d9d4f0dbec308df0
+source_license=x810-fedroid/LICENSE
+source_license_sha256=136ba9a49d67f01d2c0e9374e87eb66d0d0bb8025a8ce091911242714518ae03

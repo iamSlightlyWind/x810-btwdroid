@@ -1,0 +1,9 @@
+# Read-only copy of the active X810 kernel's external/module metadata tree.
+device=windstation
+kernel_release=7.2.0-gts9wifi
+remote_path=/usr/lib/modules/7.2.0-gts9wifi
+captured_utc=2026-11-11
+source_file_count=1875
+source_tree_sha256=0749d8578409f24a48fd01bcf73e0002dee949d8e354edc0ed4d17d542f9fecc
+destination=cache/modules/7.2.0-gts9wifi
+method=read-only SSH rsync; no remote file writes

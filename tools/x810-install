@@ -1,0 +1,910 @@
+#!/usr/bin/env python3
+"""Guarded host-side Arch rootfs installer for the Samsung SM-X810.
+
+This intentionally mirrors Fedora's guided install safety model while keeping
+the Arch trial narrower: TWRP must already be open, and the sole block-device
+write is formatting the existing PARTLABEL=linuxroot as ext4. It never changes
+GPT, Android userdata, boot images, recovery, vbmeta, or reboots the tablet.
+"""
+
+from __future__ import annotations
+
+import argparse
+import getpass
+import hashlib
+import json
+import os
+import platform
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unicodedata
+import uuid
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, Callable
+
+
+EXPECTED_MODEL = "SM-X810"
+EXPECTED_TWRP_ALIAS = "SM-X816B"  # observed generic recovery property on this X810
+EXPECTED_CODENAMES = {"gts9p", "gts9pwifi"}
+EXPECTED_BOOTLOADER_PREFIX = "X810"
+EXPECTED_KERNEL_RELEASE = "7.2.0-gts9wifi"
+ROOTFS_SEED_USERNAME = "slightlywind"
+ROOTFS_SEED_UID = 1000
+LINUXROOT = "/dev/block/by-name/linuxroot"
+LINUXROOT_NODE = "/dev/block/sda35"
+LINUXROOT_PARTITION_NUMBER = 35
+LINUXROOT_LABEL = "linuxroot"
+LINUXROOT_TYPE_GUID = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+LINUXROOT_MIN_BYTES = 32 * 1024**3
+ROOTFS_ARTIFACT_LOCK = "ARCH-ROOTFS-ARTIFACT.lock"
+INSTALL_CONFIRMATION = "INSTALL ARCH ON SM-X810 AND ERASE LINUXROOT"
+FORMAT_CONFIRMATION = "FORMAT ONLY LINUXROOT ON SM-X810"
+INSTALL_MOUNT = "/tmp/x810-arch-linuxroot"
+
+
+@dataclass
+class Check:
+    label: str
+    state: str
+    detail: str
+
+
+@dataclass
+class InstallBundle:
+    archive: Path
+    sha256: str
+    size_bytes: int
+    version: str
+
+
+def command(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
+
+
+def output(result: subprocess.CompletedProcess[str]) -> str:
+    return (result.stdout + "\n" + result.stderr).strip()
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def parse_kv(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        key, separator, value = line.partition("=")
+        if not separator:
+            continue
+        if key in values:
+            raise ValueError(f"duplicate {key!r} in {path.name}:{number}")
+        values[key] = value
+    return values
+
+
+def safe_artifact_path(project: Path, raw: str) -> Path:
+    relative = PurePosixPath(raw)
+    if relative.is_absolute() or ".." in relative.parts or not relative.parts:
+        raise ValueError("artifact lock contains an unsafe path")
+    out_dir = project / "out"
+    private_dir = out_dir / "private-rootfs"
+    if out_dir.is_symlink() or private_dir.is_symlink():
+        raise ValueError("rootfs artifact directory path must not use symlinks")
+    root = private_dir.resolve(strict=True)
+    candidate = project / Path(*relative.parts)
+    if candidate.is_symlink():
+        raise ValueError("rootfs artifact must not be a symlink")
+    path = candidate.resolve(strict=True)
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise ValueError("rootfs artifact must be inside out/private-rootfs") from error
+    if path.is_symlink() or not path.is_file() or path.suffix != ".zst":
+        raise ValueError("rootfs artifact must be a regular .tar.zst file, not a symlink")
+    return path
+
+
+def validate_install_bundle(project: Path, archive_override: Path | None = None,
+                            runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
+    """Verify the private artifact lock, sidecar, archive checksum and contents."""
+    lock_path = project / "docs" / ROOTFS_ARTIFACT_LOCK
+    if lock_path.is_symlink() or not lock_path.is_file():
+        raise ValueError(f"missing regular private artifact lock: {lock_path}")
+    lock = parse_kv(lock_path)
+    locked_archive = safe_artifact_path(project, lock.get("artifact", ""))
+    archive = locked_archive
+    if archive_override is not None:
+        if archive_override.is_symlink():
+            raise ValueError("refusing a symlinked archive path")
+        archive = archive_override.resolve(strict=True)
+        try:
+            archive.relative_to((project / "out" / "private-rootfs").resolve(strict=True))
+        except ValueError as error:
+            raise ValueError("--archive must select an artifact in out/private-rootfs") from error
+        if archive != locked_archive:
+            raise ValueError("--archive must match the artifact pinned by ARCH-ROOTFS-ARTIFACT.lock")
+
+    digest = lock.get("sha256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ValueError("artifact lock has no valid SHA-256")
+    sidecar = archive.with_name(archive.name + ".sha256")
+    if sidecar.is_symlink() or not sidecar.is_file():
+        raise ValueError("private archive SHA-256 sidecar is missing or unsafe")
+    match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9._+-]+\.tar\.zst)\n?", sidecar.read_text(encoding="ascii"))
+    if not match or match.group(1) != digest or match.group(2) != archive.name:
+        raise ValueError("archive checksum sidecar does not match the artifact lock")
+    actual = sha256_file(archive)
+    if actual != digest:
+        raise ValueError("private rootfs SHA-256 mismatch")
+    locked_size = lock.get("size_bytes", "")
+    if locked_size and (not locked_size.isdecimal() or int(locked_size) != archive.stat().st_size):
+        raise ValueError("rootfs archive size does not match the artifact lock")
+
+    verifier = project / "tools" / "verify-rootfs-archive.py"
+    if verifier.is_symlink() or not verifier.is_file():
+        raise ValueError("rootfs archive verifier is missing or unsafe")
+    verified = runner([sys.executable, str(verifier), str(archive)], timeout=1800)
+    if verified.returncode != 0:
+        raise ValueError(f"rootfs content/metadata validation failed: {output(verified)}")
+    version = lock.get("created_utc", "local")
+    return InstallBundle(archive=archive, sha256=digest, size_bytes=archive.stat().st_size, version=version)
+
+
+def adb_devices(adb_output: str) -> list[tuple[str, str]]:
+    states = {"device", "recovery", "sideload", "unauthorized", "offline"}
+    result: list[tuple[str, str]] = []
+    for line in adb_output.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] in states:
+            result.append((fields[0], fields[1]))
+    return result
+
+
+def adb_target(adb: str, serial: str | None,
+               runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> tuple[str, str]:
+    result = runner([adb, "devices", "-l"], timeout=15)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "adb devices failed")
+    rows = adb_devices(result.stdout)
+    if serial:
+        rows = [row for row in rows if row[0] == serial]
+        if not rows:
+            raise RuntimeError(f"ADB serial {serial} is not connected; run `adb devices -l`")
+    elif len(rows) > 1:
+        raise RuntimeError("multiple ADB targets are attached; rerun with --serial SERIAL")
+    elif not rows:
+        raise RuntimeError("no ADB target is attached; connect Windstation by USB and open TWRP")
+    if len(rows) != 1:
+        raise RuntimeError("ADB target selection is ambiguous")
+    target, state = rows[0]
+    if state != "recovery":
+        raise RuntimeError(
+            f"expected TWRP ADB recovery, got {state}; enter TWRP manually. "
+            "This installer never reboots the tablet."
+        )
+    return target, state
+
+
+class ADBClient:
+    """Injectable ADB transport. Block writes are not exposed as a generic API."""
+
+    def __init__(self, adb: str, serial: str,
+                 runner: Callable[..., subprocess.CompletedProcess[str]] = command):
+        self.adb = adb
+        self.serial = serial
+        self.runner = runner
+
+    def run(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+        return self.runner([self.adb, "-s", self.serial, *args], timeout=timeout)
+
+    def shell(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+        return self.run("shell", *args, timeout=timeout)
+
+    def push(self, source: Path, destination: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+        return self.run("push", str(source), destination, timeout=timeout)
+
+    def pull(self, source: str, destination: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+        return self.run("pull", source, str(destination), timeout=timeout)
+
+    def stream_rootfs(self, archive: Path, mountpoint: str, timeout: int = 3600) -> None:
+        """Decompress on the host; stream tar into TWRP Toybox without staging a huge file."""
+        command_text = f"toybox tar -x --numeric-owner -f - -C {shlex.quote(mountpoint)}"
+        try:
+            decoder = subprocess.Popen(
+                ["zstd", "-q", "-dc", str(archive)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            assert decoder.stdout is not None
+            try:
+                received = subprocess.run(
+                    [self.adb, "-s", self.serial, "exec-in", command_text],
+                    stdin=decoder.stdout, text=False, capture_output=True,
+                    timeout=timeout, check=False,
+                )
+            finally:
+                decoder.stdout.close()
+            decoder_stderr = decoder.stderr.read() if decoder.stderr else b""
+            decode_status = decoder.wait(timeout=15)
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError(f"rootfs stream failed: {error}") from error
+        if decode_status != 0:
+            detail = decoder_stderr.decode(errors="replace").strip()
+            raise RuntimeError(detail or f"zstd exited with status {decode_status}")
+        if received.returncode != 0:
+            detail = received.stderr.decode(errors="replace").strip() or received.stdout.decode(errors="replace").strip()
+            raise RuntimeError(detail or f"ADB tar extraction exited with status {received.returncode}")
+
+
+def _getprop(client: ADBClient, key: str) -> str:
+    result = client.shell("getprop", key)
+    return result.stdout.strip().replace("\r", "") if result.returncode == 0 else ""
+
+
+def twrp_identity(client: ADBClient) -> tuple[dict[str, str], list[Check]]:
+    values: dict[str, str] = {}
+    for key, prop in (
+        ("twrp", "ro.twrp.version"),
+        ("device", "ro.product.device"),
+        ("model", "ro.boot.em.model"),
+        ("bootloader", "ro.bootloader"),
+        ("flash_locked", "ro.boot.flash.locked"),
+        ("vbmeta_state", "ro.boot.vbmeta.device_state"),
+        ("verifiedbootstate", "ro.boot.verifiedbootstate"),
+    ):
+        values[key] = _getprop(client, prop)
+    uid = client.shell("id", "-u")
+    values["uid"] = uid.stdout.strip() if uid.returncode == 0 else ""
+    cmdline = client.shell("cat", "/proc/cmdline")
+    values["cmdline"] = cmdline.stdout.strip() if cmdline.returncode == 0 else ""
+
+    checks = [Check("ADB recovery", "OK", f"{client.serial} (TWRP)")]
+    if values["twrp"]:
+        checks.append(Check("TWRP", "OK", values["twrp"]))
+    else:
+        checks.append(Check("TWRP", "STOP", "ro.twrp.version is empty"))
+    if values["device"] in EXPECTED_CODENAMES:
+        checks.append(Check("Recovery codename", "OK", values["device"]))
+    else:
+        checks.append(Check("Recovery codename", "STOP", f"expected gts9p/gts9pwifi, got {values['device'] or '?'}"))
+    model_evidence = (
+        values["model"] in {EXPECTED_MODEL, EXPECTED_TWRP_ALIAS, ""}
+        and values["bootloader"].startswith(EXPECTED_BOOTLOADER_PREFIX)
+        and values["device"] in EXPECTED_CODENAMES
+    )
+    if model_evidence:
+        suffix = f"; generic TWRP model alias {values['model']} accepted only with X810 bootloader/codename" if values["model"] == EXPECTED_TWRP_ALIAS else ""
+        checks.append(Check("Tablet identity", "OK", f"bootloader {values['bootloader']}{suffix}"))
+    else:
+        checks.append(Check(
+            "Tablet identity", "STOP",
+            f"requires SM-X810 bootloader plus gts9p codename; got {values['model'] or '?'} / "
+            f"{values['bootloader'] or '?'} / {values['device'] or '?'}",
+        ))
+    locked = values["flash_locked"] == "1" or values["vbmeta_state"].lower() == "locked"
+    unlocked_evidence = (
+        values["flash_locked"] == "0"
+        or values["vbmeta_state"].lower() == "unlocked"
+        or values["verifiedbootstate"].lower() == "orange"
+    )
+    if locked:
+        checks.append(Check("Bootloader", "STOP", "TWRP properties report a locked bootloader"))
+    elif unlocked_evidence:
+        checks.append(Check("Bootloader", "OK", "TWRP properties report unlocked/orange state"))
+    else:
+        checks.append(Check("Bootloader", "STOP", "TWRP properties do not prove an unlocked bootloader"))
+    if values["uid"] == "0":
+        checks.append(Check("Recovery privileges", "OK", "ADB shell is root"))
+    else:
+        checks.append(Check("Recovery privileges", "STOP", f"ADB shell uid is {values['uid'] or 'unknown'}, expected 0"))
+    return values, checks
+
+
+def _shell_text(result: subprocess.CompletedProcess[str], label: str) -> str:
+    if result.returncode != 0:
+        raise RuntimeError(f"{label}: {output(result) or f'exited {result.returncode}'}")
+    return result.stdout.strip().replace("\r", "")
+
+
+def validate_partition(client: ADBClient, archive_bytes: int) -> tuple[dict[str, Any], list[Check]]:
+    checks: list[Check] = []
+    resolved = _shell_text(client.shell("readlink", "-f", LINUXROOT), "resolve linuxroot")
+    if resolved != LINUXROOT_NODE:
+        raise RuntimeError(f"PARTLABEL=linuxroot resolves to {resolved}, expected {LINUXROOT_NODE}")
+    size_text = _shell_text(client.shell("blockdev", "--getsize64", LINUXROOT), "read linuxroot size")
+    try:
+        size = int(size_text)
+    except ValueError as error:
+        raise RuntimeError(f"invalid linuxroot byte size: {size_text!r}") from error
+    if size < LINUXROOT_MIN_BYTES or size < archive_bytes:
+        raise RuntimeError(
+            f"linuxroot is too small: {size:,} bytes; minimum is "
+            f"{max(LINUXROOT_MIN_BYTES, archive_bytes):,} bytes"
+        )
+    def blkid_tag(tag: str, description: str) -> str:
+        # TWRP's Android Toybox provides blkid as an applet but not as a
+        # standalone executable, and its implementation does not support
+        # util-linux's `-o value`. Parse its stable TAG="value" output.
+        result = _shell_text(client.shell("toybox", "blkid", "-s", tag, LINUXROOT), description)
+        values = re.findall(rf'(?:^|\s){re.escape(tag)}="([^"]*)"(?:$|\s)', result)
+        if len(values) != 1:
+            raise RuntimeError(f"{description}: could not parse Toybox blkid output: {result!r}")
+        return values[0]
+
+    label = blkid_tag("LABEL", "read linuxroot label")
+    filesystem = blkid_tag("TYPE", "read linuxroot filesystem")
+    if label != LINUXROOT_LABEL or filesystem != "ext4":
+        raise RuntimeError(f"expected existing ext4 label linuxroot; found label={label!r}, type={filesystem!r}")
+    info = _shell_text(client.shell("sgdisk", f"--info={LINUXROOT_PARTITION_NUMBER}", "/dev/block/sda"), "read linuxroot GPT entry")
+    if not re.search(r"(?im)^\s*Partition name:\s*['\"]linuxroot['\"]\s*$", info):
+        raise RuntimeError("GPT entry 35 is not named linuxroot")
+    type_match = re.search(r"(?im)^\s*Partition GUID code:\s*([0-9a-f-]{36})", info)
+    if not type_match or type_match.group(1).upper() != LINUXROOT_TYPE_GUID:
+        raise RuntimeError("GPT entry 35 does not have the expected Linux filesystem type GUID")
+    mounts = _shell_text(client.shell("cat", "/proc/mounts"), "read active mounts")
+    for line in mounts.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[0] in {LINUXROOT, LINUXROOT_NODE}:
+            raise RuntimeError(f"linuxroot is already mounted at {fields[1]}; refusing to format it")
+    facts = {"node": resolved, "size_bytes": size, "label": label, "filesystem": filesystem, "gpt": info}
+    checks.extend((
+        Check("Target partition", "OK", f"{resolved}, ext4 label={label}, {size:,} bytes"),
+        Check("GPT entry", "OK", "entry 35 is Linux filesystem / linuxroot; GPT will not be changed"),
+        Check("Mount state", "OK", "target filesystem is not mounted"),
+    ))
+    return facts, checks
+
+
+def preflight_twrp_tools(client: ADBClient) -> list[Check]:
+    required = ("sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot")
+    checks = []
+    for tool in required:
+        # Quote the complete command string: adb shell concatenates arguments
+        # remotely, so an unquoted `sh -c command -v tool` would check only
+        # `command` and falsely report missing tools as present.
+        command_text = shlex.quote(f"command -v {shlex.quote(tool)}")
+        result = client.shell("sh", "-c", command_text)
+        if result.returncode == 0:
+            checks.append(Check(f"TWRP tool: {tool}", "OK", result.stdout.strip() or "available"))
+        else:
+            checks.append(Check(f"TWRP tool: {tool}", "STOP", "required for safe rootfs-only install"))
+    blkid = client.shell("toybox", "blkid", "-s", "LABEL", LINUXROOT)
+    if blkid.returncode == 0:
+        checks.append(Check("TWRP tool: blkid", "OK", "Toybox blkid applet"))
+    else:
+        checks.append(Check("TWRP tool: blkid", "STOP", "Toybox blkid applet is required to inspect linuxroot"))
+    return checks
+
+
+def host_checks(adb: str | None = None) -> list[Check]:
+    checks = [Check("Host OS", "OK" if platform.system() == "Linux" else "STOP", platform.system())]
+    for program in ("adb", "zstd", "openssl"):
+        path = adb if program == "adb" and adb else shutil.which(program)
+        checks.append(Check(f"Host tool: {program}", "OK" if path else "STOP", path or "not found"))
+    return checks
+
+
+def show_checks(checks: list[Check]) -> None:
+    width = max((len(item.label) for item in checks), default=0)
+    for item in checks:
+        print(f"[{item.state:5}] {item.label:<{width}}  {item.detail}")
+
+
+def write_gpt_backup(client: ADBClient, project: Path, identity: dict[str, str],
+                     partition: dict[str, Any], bundle: InstallBundle) -> Path:
+    """Save only read-only GPT metadata before writing linuxroot (not a data backup)."""
+    base = project / "out" / "install-backups"
+    if base.is_symlink():
+        raise RuntimeError("install-backups must not be a symlink")
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(base, 0o700)
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{int(time.time() * 1_000_000) % 1_000_000:06d}"
+    backup = base / f"x810-arch-{stamp}"
+    backup.mkdir(mode=0o700)
+    token = uuid.uuid4().hex
+    remote = f"/tmp/x810-arch-gpt-{token}.bin"
+    try:
+        result = client.shell("sgdisk", f"--backup={remote}", "/dev/block/sda", timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(f"could not capture UFS GPT metadata: {output(result)}")
+        local_gpt = backup / "sda-gpt.bin"
+        pulled = client.pull(remote, local_gpt, timeout=120)
+        if pulled.returncode != 0 or not local_gpt.is_file() or local_gpt.stat().st_size < 1:
+            raise RuntimeError(f"could not retrieve GPT metadata backup: {output(pulled)}")
+        verify = client.shell("sgdisk", "--verify", "/dev/block/sda", timeout=60)
+        if verify.returncode != 0:
+            raise RuntimeError(f"read-only GPT verification failed: {output(verify)}")
+        listing = client.shell("sgdisk", "--print", "/dev/block/sda", timeout=60)
+        if listing.returncode != 0:
+            raise RuntimeError(f"could not save GPT listing: {output(listing)}")
+        (backup / "sda-gpt.txt").write_text(listing.stdout + verify.stdout + verify.stderr, encoding="utf-8")
+        metadata = {
+            "schema_version": 1,
+            "device_model": EXPECTED_MODEL,
+            "recovery_codename": identity.get("device", ""),
+            "bootloader": identity.get("bootloader", ""),
+            "twrp_version": identity.get("twrp", ""),
+            "adb_serial": client.serial,
+            "created_local": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            "rootfs_archive": bundle.archive.name,
+            "rootfs_sha256": bundle.sha256,
+            "linuxroot": {key: value for key, value in partition.items() if key != "gpt"},
+            "gpt_metadata_sha256": sha256_file(local_gpt),
+            "scope": "GPT metadata only; not a partition-data or userdata backup",
+        }
+        (backup / "manifest.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+        for path in backup.iterdir():
+            if path.is_file():
+                os.chmod(path, 0o600)
+        return backup
+    except Exception:
+        marker = backup / "INCOMPLETE.txt"
+        marker.write_text("Pre-install GPT metadata backup incomplete; do not treat this directory as complete.\n", encoding="utf-8")
+        os.chmod(marker, 0o600)
+        raise
+    finally:
+        # This unlinks a file in recovery's RAM tmpfs; it does not touch a block partition.
+        client.shell("rm", "-f", remote)
+
+
+def hash_password(password: str) -> str:
+    if not password or "\n" in password or "\r" in password or "\x00" in password:
+        raise ValueError("password must be non-empty and contain no newline or NUL")
+    result = subprocess.run(["openssl", "passwd", "-6", "-stdin"], input=password + "\n",
+                            text=True, capture_output=True, timeout=15, check=False)
+    hashed = result.stdout.strip()
+    if result.returncode != 0 or not hashed.startswith("$6$"):
+        raise RuntimeError("OpenSSL did not produce a SHA-512-crypt hash")
+    return hashed
+
+
+def prompt_install_details(password_reader: Callable[[str], str] = getpass.getpass,
+                           input_func: Callable[[str], str] = input) -> dict[str, str]:
+    """Collect a fresh-install identity and password, matching the Fedora flow."""
+    def prompt_nonempty(label: str, validation: Callable[[str], None]) -> str:
+        while True:
+            answer = input_func(label).strip()
+            try:
+                validation(answer)
+                return answer
+            except ValueError as error:
+                print(f"Invalid value: {error}")
+
+    def valid_username(value: str) -> None:
+        if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", value):
+            raise ValueError("username must be 1-32 lowercase Linux account characters and start with a letter/underscore")
+
+    def valid_hostname(value: str) -> None:
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", value):
+            raise ValueError("hostname must be a single DNS label of at most 63 letters, digits, or hyphens")
+
+    def valid_full_name(value: str) -> None:
+        if (not value or len(value) > 128 or ":" in value or
+                any(unicodedata.category(ch).startswith("C") for ch in value)):
+            raise ValueError("enter a non-empty name (up to 128 characters) without control characters")
+
+    details: dict[str, str] = {}
+    details["full_name"] = prompt_nonempty("Full name: ", valid_full_name)
+    details["username"] = prompt_nonempty("Linux username: ", valid_username)
+    details["hostname"] = prompt_nonempty("Hostname: ", valid_hostname)
+    for _ in range(3):
+        first = password_reader("New Arch user password (hidden): ")
+        second = password_reader("Repeat password: ")
+        if not first or "\n" in first or "\r" in first or "\x00" in first:
+            print("Password may not be empty or contain newline or NUL characters.")
+        elif first != second:
+            print("Passwords do not match.")
+        else:
+            details["password_hash"] = hash_password(first)
+            return details
+    raise ValueError("password confirmation failed")
+
+
+def provision_rootfs_account(client: ADBClient, mountpoint: str, username: str,
+                             full_name: str, hostname: str, password_hash: str) -> None:
+    """Replace the image's build-time seed with the installer's fresh user."""
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", username):
+        raise ValueError("invalid username")
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", hostname):
+        raise ValueError("invalid hostname")
+    if (not full_name or len(full_name) > 128 or ":" in full_name or
+            any(unicodedata.category(ch).startswith("C") for ch in full_name)):
+        raise ValueError("invalid full name")
+    if not password_hash.startswith("$6$") or "\n" in password_hash:
+        raise ValueError("invalid SHA-512-crypt password hash")
+
+    # The archive is a private build template and contains a temporary
+    # bootstrap account so it can be assembled/tested over SSH. A real install
+    # discards that account/home and creates the installer-selected account,
+    # just as the Fedora installer does. Preserve only its public SSH key so
+    # the pre-authorized remote-access path remains usable.
+    remote_script = f"""#!/system/bin/sh
+set -eu
+umask 077
+TMPDIR=/tmp
+export TMPDIR
+ROOT={shlex.quote(mountpoint)}
+SEED={shlex.quote(ROOTFS_SEED_USERNAME)}
+NEW={shlex.quote(username)}
+FULL={shlex.quote(full_name)}
+HOST={shlex.quote(hostname)}
+PASSFILE=/tmp/x810-arch-password-hash
+KEYFILE=/tmp/x810-arch-authorized-keys
+DEV_BOUND=0
+cleanup_provision() {{
+  if [ "$DEV_BOUND" = 1 ]; then umount "$ROOT/dev" >/dev/null 2>&1 || true; fi
+  rm -f "$KEYFILE"
+}}
+trap cleanup_provision EXIT
+test -f "$ROOT/etc/passwd"
+test -f "$ROOT/etc/group"
+test -f "$ROOT/etc/shadow"
+test -d "$ROOT/etc/ssh/sshd_config.d"
+test -d "$ROOT/etc/sudoers.d"
+test -d "$ROOT/etc/skel"
+test -d /tmp
+for utility in userdel useradd groupdel getent chpasswd passwd id stat sshd visudo; do
+  test -x "$ROOT/usr/bin/$utility"
+done
+for group in wheel video audio input storage; do
+  chroot "$ROOT" /usr/bin/getent group "$group" >/dev/null
+done
+test -f "$ROOT/home/$SEED/.ssh/authorized_keys"
+test -s "$PASSFILE"
+awk -F: -v user="$SEED" -v uid={ROOTFS_SEED_UID} -v home="/home/$SEED" \
+  '$3 == uid {{ uid_count++ }} $1 == user && $3 == uid && $4 == uid && $6 == home {{ found++ }} \
+   END {{ exit found != 1 || uid_count != 1 }}' "$ROOT/etc/passwd"
+awk -F: -v user="$SEED" -v gid={ROOTFS_SEED_UID} \
+  '$3 == gid {{ gid_count++ }} $1 == user && $3 == gid {{ found++ }} \
+   END {{ exit found != 1 || gid_count != 1 }}' "$ROOT/etc/group"
+# The requested name is a genuinely fresh account name; its only allowed
+# collision is the template account when the user explicitly chooses that name.
+if [ "$NEW" != "$SEED" ]; then
+  if awk -F: -v user="$NEW" '$1 == user {{ found=1 }} END {{ exit !found }}' "$ROOT/etc/passwd"; then
+    echo 'X810_ACCOUNT: requested username already exists in the clean rootfs template' >&2
+    exit 21
+  fi
+  if awk -F: -v group="$NEW" '$1 == group {{ found=1 }} END {{ exit !found }}' "$ROOT/etc/group"; then
+    echo 'X810_ACCOUNT: requested username conflicts with an existing system group' >&2
+    exit 22
+  fi
+  if [ -e "$ROOT/home/$NEW" ]; then
+    echo 'X810_ACCOUNT: requested home directory already exists in the clean rootfs template' >&2
+    exit 23
+  fi
+fi
+
+cp "$ROOT/home/$SEED/.ssh/authorized_keys" "$KEYFILE"
+chmod 0600 "$KEYFILE"
+mkdir -p "$ROOT/dev"
+mount -o bind /dev "$ROOT/dev"
+DEV_BOUND=1
+chroot "$ROOT" /usr/bin/userdel "$SEED"
+# Delete the home explicitly after first preserving the key. This avoids the
+# harmless but noisy userdel -r warning when no mail spool exists in the image.
+rm -rf "$ROOT/home/$SEED"
+# userdel normally removes the seed private group as well. Remove it explicitly
+# if this shadow-utils build leaves it behind, so UID/GID 1000 can be reused.
+if chroot "$ROOT" /usr/bin/getent group "$SEED" >/dev/null 2>&1; then
+  chroot "$ROOT" /usr/bin/groupdel "$SEED"
+fi
+chroot "$ROOT" /usr/bin/useradd --no-create-home --uid {ROOTFS_SEED_UID} --user-group \
+  --groups wheel,video,audio,input,storage --shell /bin/bash --comment "$FULL" "$NEW"
+chroot "$ROOT" /usr/bin/chpasswd --encrypted < "$PASSFILE"
+chroot "$ROOT" /usr/bin/passwd --lock root
+
+mkdir -p "$ROOT/home/$NEW"
+cp -R "$ROOT/etc/skel/." "$ROOT/home/$NEW/"
+mkdir -p "$ROOT/home/$NEW/.ssh"
+cp "$KEYFILE" "$ROOT/home/$NEW/.ssh/authorized_keys"
+chown -R {ROOTFS_SEED_UID}:{ROOTFS_SEED_UID} "$ROOT/home/$NEW"
+chmod 0700 "$ROOT/home/$NEW" "$ROOT/home/$NEW/.ssh"
+chmod 0600 "$ROOT/home/$NEW/.ssh/authorized_keys"
+rm -f "$KEYFILE"
+
+printf '%s\\n' 'PubkeyAuthentication yes' 'AuthenticationMethods publickey' \
+  'PasswordAuthentication no' 'KbdInteractiveAuthentication no' \
+  'PermitEmptyPasswords no' 'PermitRootLogin no' "AllowUsers $NEW" \
+  > "$ROOT/etc/ssh/sshd_config.d/90-windstation.conf"
+printf '%s ALL=(ALL:ALL) NOPASSWD: ALL\\n' "$NEW" > "$ROOT/etc/sudoers.d/40-windstation"
+chmod 0440 "$ROOT/etc/sudoers.d/40-windstation"
+printf '%s\\n' "$HOST" > "$ROOT/etc/hostname"
+chmod 0644 "$ROOT/etc/hostname"
+printf '%s\\n' "127.0.0.1 localhost.localdomain localhost $HOST" \
+  '::1       localhost.localdomain localhost' > "$ROOT/etc/hosts"
+chmod 0644 "$ROOT/etc/hosts"
+
+account_ok=0
+while IFS=: read -r name passwd uid gid gecos home shell; do
+  if [ "$name" = "$NEW" ] && [ "$uid" = {ROOTFS_SEED_UID} ] && \
+     [ "$gid" = {ROOTFS_SEED_UID} ] && [ "$gecos" = "$FULL" ] && \
+     [ "$home" = "/home/$NEW" ] && [ "$shell" = /bin/bash ]; then
+    account_ok=1
+    break
+  fi
+done < "$ROOT/etc/passwd"
+if [ "$account_ok" -ne 1 ] || [ ! -s "$ROOT/home/$NEW/.ssh/authorized_keys" ]; then
+  echo 'X810_VERIFY: fresh account, home, or preserved authorized key is missing/invalid' >&2
+  exit 31
+fi
+groups=$(chroot "$ROOT" /usr/bin/id -Gn "$NEW")
+for group in wheel video audio input storage; do
+  case " $groups " in *" $group "*) ;; *) echo "X810_VERIFY: user lacks $group group" >&2; exit 32 ;; esac
+done
+grep -Fxq "AllowUsers $NEW" "$ROOT/etc/ssh/sshd_config.d/90-windstation.conf"
+grep -Fxq "$NEW ALL=(ALL:ALL) NOPASSWD: ALL" "$ROOT/etc/sudoers.d/40-windstation"
+chroot "$ROOT" /usr/bin/sshd -t -f /etc/ssh/sshd_config
+chroot "$ROOT" /usr/bin/visudo -c
+grep -Fxq "$HOST" "$ROOT/etc/hostname"
+test "$(chroot "$ROOT" /usr/bin/stat -c '%u:%g:%a' "/home/$NEW/.ssh/authorized_keys")" = "{ROOTFS_SEED_UID}:{ROOTFS_SEED_UID}:600"
+umount "$ROOT/dev"
+DEV_BOUND=0
+"""
+    with tempfile.TemporaryDirectory(prefix="x810-arch-provision-") as temporary:
+        stage = Path(temporary)
+        script = stage / "provision.sh"
+        secret = stage / "password-hash"
+        script.write_text(remote_script, encoding="utf-8")
+        secret.write_text(f"{username}:{password_hash}\n", encoding="ascii")
+        os.chmod(script, 0o600)
+        os.chmod(secret, 0o600)
+        for source, target in ((script, "/tmp/x810-arch-provision.sh"), (secret, "/tmp/x810-arch-password-hash")):
+            result = client.push(source, target)
+            if result.returncode != 0:
+                raise RuntimeError(f"could not stage fresh-account provisioner in TWRP: {output(result)}")
+            mode = client.shell("chmod", "0600", target)
+            if mode.returncode != 0:
+                raise RuntimeError("could not protect temporary account-provisioning files in TWRP")
+        try:
+            result = client.shell("sh", "/tmp/x810-arch-provision.sh", timeout=120)
+            if result.returncode != 0:
+                raise RuntimeError(output(result) or "could not create the fresh Arch login account")
+        finally:
+            client.shell("rm", "-f", "/tmp/x810-arch-provision.sh", "/tmp/x810-arch-password-hash",
+                         "/tmp/x810-arch-authorized-keys")
+
+
+def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
+    checks = (
+        ("test", "-x", f"{mountpoint}/usr/bin/systemctl"),
+        ("test", "-f", f"{mountpoint}/usr/lib/modules/{EXPECTED_KERNEL_RELEASE}/modules.dep"),
+        ("test", "-f", f"{mountpoint}/usr/lib/systemd/system/gdm.service"),
+        ("test", "-x", f"{mountpoint}/usr/bin/gnome-control-center"),
+        ("test", "-x", f"{mountpoint}/usr/bin/gnome-session"),
+        ("test", "-x", f"{mountpoint}/usr/bin/gnome-terminal"),
+        ("test", "-x", f"{mountpoint}/usr/bin/brave"),
+        ("test", "-x", f"{mountpoint}/usr/bin/bluetoothctl"),
+        ("test", "-f", f"{mountpoint}/usr/lib/systemd/system/bluetooth.service"),
+        ("test", "-L", f"{mountpoint}/etc/systemd/system/bluetooth.target.wants/bluetooth.service"),
+        ("test", "-x", f"{mountpoint}/usr/bin/tab-companion"),
+        ("test", "-x", f"{mountpoint}/usr/local/libexec/x810-boot-switch-core"),
+        ("test", "-x", f"{mountpoint}/usr/local/libexec/tab-companion-boot-status"),
+        ("test", "-x", f"{mountpoint}/usr/local/libexec/tab-companion-boot-switch"),
+        ("test", "-f", f"{mountpoint}/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/extension.js"),
+        ("test", "-f", f"{mountpoint}/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json"),
+        ("test", "-L", f"{mountpoint}/etc/systemd/system/display-manager.service"),
+        ("test", "-f", f"{mountpoint}/usr/lib/systemd/system/graphical.target"),
+    )
+    for check in checks:
+        result = client.shell(*check)
+        if result.returncode != 0:
+            raise RuntimeError(f"post-extraction check failed: {' '.join(check)}")
+    default = client.shell("readlink", f"{mountpoint}/etc/systemd/system/default.target")
+    if default.returncode != 0 or "graphical.target" not in default.stdout:
+        raise RuntimeError("post-extraction check failed: default target is not graphical.target")
+    bluetooth = client.shell(
+        "readlink", f"{mountpoint}/etc/systemd/system/bluetooth.target.wants/bluetooth.service"
+    )
+    if bluetooth.returncode != 0 or "bluetooth.service" not in bluetooth.stdout:
+        raise RuntimeError("post-extraction check failed: bluetooth.service is not enabled")
+    auto_enable = client.shell(
+        "grep", "-Fxq", "AutoEnable=true", f"{mountpoint}/etc/bluetooth/main.conf"
+    )
+    if auto_enable.returncode != 0:
+        raise RuntimeError("post-extraction check failed: BlueZ AutoEnable=true is missing")
+    manager = client.shell("readlink", f"{mountpoint}/etc/systemd/system/display-manager.service")
+    if manager.returncode != 0 or "gdm.service" not in manager.stdout:
+        raise RuntimeError("post-extraction check failed: display-manager.service is not GDM")
+    wants_display_manager = client.shell(
+        "grep", "-Fq", "Wants=display-manager.service",
+        f"{mountpoint}/usr/lib/systemd/system/graphical.target",
+    )
+    if wants_display_manager.returncode != 0:
+        raise RuntimeError("post-extraction check failed: graphical.target does not pull in display-manager.service")
+    os_release = client.shell("grep", "-Fxq", "ID=archarm", f"{mountpoint}/etc/os-release")
+    if os_release.returncode != 0:
+        raise RuntimeError("post-extraction check failed: rootfs is not Arch Linux ARM")
+
+
+def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
+                       account_details: dict[str, str]) -> None:
+    size = _shell_text(client.shell("blockdev", "--getsize64", LINUXROOT), "recheck linuxroot size")
+    if int(size) < max(LINUXROOT_MIN_BYTES, bundle.size_bytes):
+        raise RuntimeError("linuxroot size changed or is too small immediately before format")
+    makefs = client.shell(*linuxroot_format_args(), timeout=600)
+    if makefs.returncode != 0:
+        raise RuntimeError(f"formatting only {LINUXROOT} failed: {output(makefs)}")
+    mkdir = client.shell("mkdir", "-p", INSTALL_MOUNT)
+    if mkdir.returncode != 0:
+        raise RuntimeError(f"could not create temporary recovery mountpoint: {output(mkdir)}")
+    mounted = client.shell("mount", "-t", "ext4", LINUXROOT, INSTALL_MOUNT, timeout=60)
+    if mounted.returncode != 0:
+        raise RuntimeError(f"could not mount linuxroot after format: {output(mounted)}")
+    try:
+        client.stream_rootfs(bundle.archive, INSTALL_MOUNT)
+        provision_rootfs_account(
+            client, INSTALL_MOUNT, account_details["username"],
+            account_details["full_name"], account_details["hostname"],
+            account_details["password_hash"],
+        )
+        sync = client.shell("sync", timeout=120)
+        if sync.returncode != 0:
+            raise RuntimeError("sync after rootfs extraction failed")
+    finally:
+        unmounted = client.shell("umount", INSTALL_MOUNT, timeout=120)
+        if unmounted.returncode != 0:
+            raise RuntimeError(f"could not unmount linuxroot; remain in TWRP: {output(unmounted)}")
+    check = client.shell("e2fsck", "-f", "-n", LINUXROOT, timeout=900)
+    if check.returncode != 0:
+        raise RuntimeError(f"read-only e2fsck did not pass; remain in TWRP: {output(check)}")
+    remount = client.shell("mount", "-t", "ext4", "-o", "ro", LINUXROOT, INSTALL_MOUNT, timeout=60)
+    if remount.returncode != 0:
+        raise RuntimeError(f"could not mount linuxroot read-only for verification: {output(remount)}")
+    try:
+        verify_extracted_rootfs(client, INSTALL_MOUNT)
+    finally:
+        unmounted = client.shell("umount", INSTALL_MOUNT, timeout=120)
+        if unmounted.returncode != 0:
+            raise RuntimeError(f"could not unmount verified linuxroot; remain in TWRP: {output(unmounted)}")
+    sync = client.shell("sync", timeout=120)
+    if sync.returncode != 0:
+        raise RuntimeError("final sync failed")
+    (backup / "INSTALL-COMPLETE.txt").write_text(
+        "Arch rootfs installed and read-back checked. Only PARTLABEL=linuxroot was formatted/written. "
+        "No Android partition, GPT, boot image, recovery, vbmeta, userdata, or firmware was modified. "
+        "No reboot was performed.\n",
+        encoding="utf-8",
+    )
+    os.chmod(backup / "INSTALL-COMPLETE.txt", 0o600)
+
+
+def linuxroot_format_args() -> tuple[str, ...]:
+    """The installer has one explicit block-write command, scoped to linuxroot."""
+    return ("mke2fs", "-F", "-t", "ext4", "-L", LINUXROOT_LABEL, "-m", "0", LINUXROOT)
+
+
+def print_plan(bundle: InstallBundle, partition: dict[str, Any]) -> None:
+    print("\nArch Linux ARM on Windstation (SM-X810) — rootfs-only installation plan")
+    print(f"  Rootfs artifact: {bundle.archive.name} ({bundle.size_bytes:,} bytes)")
+    print(f"  SHA-256: {bundle.sha256}")
+    print(f"  Target: {partition['node']} ({partition['size_bytes']:,} bytes), ext4 label=linuxroot")
+    print("  Rootfs profile: GNOME Shell + GDM + Tab Companion + matching X810 kernel modules")
+    print("  Block write: format only /dev/block/by-name/linuxroot as ext4")
+    print("  Never written: GPT, userdata, super, boot, init_boot, vendor_boot, dtbo, recovery, vbmeta, firmware")
+    print("  Reboot: none; the installer stops in TWRP")
+    print("  Backup: host-side sda GPT metadata only; not a partition/data backup")
+
+
+def run_doctor(serial: str | None = None,
+               runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> int:
+    adb = shutil.which("adb")
+    checks = host_checks(adb)
+    show_checks(checks)
+    if any(item.state == "STOP" for item in checks):
+        return 2
+    try:
+        target, _ = adb_target(adb or "adb", serial, runner)
+        client = ADBClient(adb or "adb", target, runner)
+        _, identity_checks = twrp_identity(client)
+        show_checks(identity_checks)
+        tools = preflight_twrp_tools(client)
+        show_checks(tools)
+        if any(item.state == "STOP" for item in identity_checks + tools):
+            return 2
+        facts, partition_checks = validate_partition(client, 0)
+        show_checks(partition_checks)
+        return 0 if facts and not any(item.state == "STOP" for item in partition_checks) else 2
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"DOCTOR STOPPED: {error}", file=sys.stderr)
+        return 2
+
+
+def run_install(project: Path, bundle: InstallBundle, serial: str | None = None,
+                plan_only: bool = False,
+                runner: Callable[..., subprocess.CompletedProcess[str]] = command,
+                password_reader: Callable[[str], str] = getpass.getpass,
+                input_func: Callable[[str], str] = input) -> int:
+    if platform.system() != "Linux":
+        print("STOP: this installer requires a Linux host.")
+        return 2
+    adb = shutil.which("adb")
+    checks = host_checks(adb)
+    show_checks(checks)
+    if any(item.state == "STOP" for item in checks):
+        return 2
+    try:
+        target, _ = adb_target(adb or "adb", serial, runner)
+        client = ADBClient(adb or "adb", target, runner)
+        values, identity_checks = twrp_identity(client)
+        show_checks(identity_checks)
+        if any(item.state == "STOP" for item in identity_checks):
+            print("STOP: TWRP identity/root checks failed; no tablet writes were made.")
+            return 2
+        tool_checks = preflight_twrp_tools(client)
+        show_checks(tool_checks)
+        if any(item.state == "STOP" for item in tool_checks):
+            print("STOP: TWRP is missing a required utility; no tablet writes were made.")
+            return 2
+        partition, partition_checks = validate_partition(client, bundle.size_bytes)
+        show_checks(partition_checks)
+        print_plan(bundle, partition)
+        if plan_only:
+            print("PLAN ONLY: no GPT backup or tablet writes performed.")
+            return 0
+        account_details = prompt_install_details(password_reader, input_func)
+        try:
+            entered = input_func(f"Type exactly `{INSTALL_CONFIRMATION}` to continue: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("Cancelled; no tablet changes were made.")
+            return 1
+        if entered != INSTALL_CONFIRMATION:
+            print("Confirmation did not match; no tablet changes were made.")
+            return 1
+        backup = write_gpt_backup(client, project, values, partition, bundle)
+        print(f"Read-only GPT metadata backup saved to {backup}; this is not a data backup.")
+        try:
+            entered = input_func(f"Type exactly `{FORMAT_CONFIRMATION}` to format linuxroot: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("Cancelled; linuxroot was not formatted. GPT metadata backup retained.")
+            return 1
+        if entered != FORMAT_CONFIRMATION:
+            print("Confirmation did not match; linuxroot was not formatted.")
+            return 1
+        format_and_install(client, bundle, backup, account_details)
+        print(f"\nArch rootfs extracted, fresh {account_details['username']} account created, and read-only filesystem verification passed.")
+        print(f"Install record / GPT metadata backup: {backup}")
+        print("No reboot was performed. Manually choose when to leave TWRP after reviewing the result.")
+        return 0
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as error:
+        print(f"INSTALL STOPPED: {error}", file=sys.stderr)
+        print("No automatic reboot was attempted. If formatting/extraction began, remain in TWRP and rerun only after reviewing the failure.", file=sys.stderr)
+        return 2
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Safely install the verified Arch GNOME/GDM rootfs to linuxroot from an already-open X810 TWRP session."
+    )
+    parser.add_argument("command", nargs="?", choices=("install", "doctor"), default="install",
+                        help="install the local rootfs (default), or perform read-only host/TWRP checks")
+    parser.add_argument("--serial", help="select this ADB serial if multiple devices are connected")
+    parser.add_argument("--archive", type=Path, help="select the artifact already pinned by ARCH-ROOTFS-ARTIFACT.lock")
+    parser.add_argument("--plan-only", action="store_true", help="verify target and show the plan; do not create backup or write tablet")
+    args = parser.parse_args()
+    project = Path(__file__).resolve().parents[1]
+    if args.command == "doctor":
+        if args.archive is not None or args.plan_only:
+            parser.error("doctor does not accept --archive or --plan-only")
+        return run_doctor(args.serial)
+    if not args.plan_only and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("STOP: install requires an interactive terminal for hidden password entry and typed confirmations.", file=sys.stderr)
+        return 2
+    try:
+        bundle = validate_install_bundle(project, args.archive)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        print(f"INSTALL STOPPED: local rootfs verification failed: {error}", file=sys.stderr)
+        return 2
+    print(f"Verified local rootfs {bundle.archive.name}; SHA-256 {bundle.sha256}.", flush=True)
+    return run_install(project, bundle, args.serial, args.plan_only)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

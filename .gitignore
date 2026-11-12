@@ -1,0 +1,65 @@
+# Local downloads, reference clones, and keyrings.
+/cache/
+/references/
+/local-assets/
+/gnupg/
+
+# Staged rootfs, private archives, build artifacts, and scratch.
+/work/
+/out/
+/tmp/
+/build/
+/artifacts/
+/_ci/
+/.local/
+/x810-gpt-backup-*/
+/x810-install-backup-*/
+
+# Disk, boot, kernel-module, and package artifacts are inputs/outputs, not source.
+*.img
+*.img.xz
+*.raw
+*.bin
+*.ko
+*.ko.*
+*.pkg.tar.*
+*.tar.zst
+*.tar.zst.sha256
+*.log
+
+# Local credentials or device state, even if accidentally copied outside work/.
+.env
+.env.*
+!.env.example
+**/id_rsa
+**/id_ed25519
+**/id_ecdsa
+**/id_dsa
+**/ssh_host_*_key
+**/authorized_keys
+**/known_hosts
+**/tailscaled.state
+**/NetworkManager/system-connections/**
+**/wpa_supplicant.conf
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.secret
+**/*credentials*
+
+# Python and editor/test output.
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+.DS_Store
+*.swp
+*~
+
+# Generated local artifact identity; never publish paths or hashes for private archives.
+/docs/ARCH-ROOTFS-ARTIFACT.lock

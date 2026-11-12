@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+
+post_install() {
+  cat <<'NOTICE'
+x810-device-support installed. It does not enable or start services during
+package installation. Keep x810-thermal-limit.service disabled until its
+policy has been validated on the target device.
+NOTICE
+}
+
+post_upgrade() {
+  :
+}

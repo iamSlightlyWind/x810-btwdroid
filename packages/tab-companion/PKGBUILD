@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: MIT
+# Windstation image package wrapper around Tab Companion's existing Arch source.
+pkgname=tab-companion
+pkgver=1.4.2
+pkgrel=4
+pkgdesc='Samsung Galaxy tablet S Pen, keyboard and hardware companion'
+arch=('any')
+url='https://github.com/iamSlightlyWind/tab-companion'
+license=('MIT')
+install='tab-companion.install'
+depends=(
+  'python'
+  'python-gobject'
+  'python-dbus'
+  'gtk4'
+  'libadwaita'
+  'glib2'
+  'polkit'
+  'systemd'
+  'dbus'
+  'gnome-shell'
+)
+makedepends=('git')
+source=(
+  "tab-companion::git+https://github.com/iamSlightlyWind/tab-companion.git#commit=c8a9cd09a498530bfe736eb586125c91bef340f5"
+)
+sha256sums=('SKIP')
+
+build() {
+  cd "$srcdir/tab-companion"
+  APP_BUILD_RUN_ID=0 \
+    APP_BUILD_RUN_NUMBER=0 \
+    APP_BUILD_HEAD_SHA=c8a9cd09a498530bfe736eb586125c91bef340f5 \
+    APP_BUILD_BRANCH=windstation-image \
+    bash ports/fedora-x810/tools/build-tab-companion-x810-bundle.sh
+}
+
+package() {
+  local bundle="$srcdir/tab-companion/ports/fedora-x810/out/tab-companion-x810.tar.gz"
+  if [[ ! -s "$bundle" ]]; then
+    printf 'Expected the upstream X810 application bundle: %s\n' "$bundle" >&2
+    return 1
+  fi
+  install -d "$pkgdir"
+  tar -xzf "$bundle" -C "$pkgdir"
+  # Keep the browser selector/Brave limiter in sync with the Arch GNOME
+  # profile even while the upstream source commit remains pinned above.
+  for relative in \
+    usr/lib/tab-companion/tab_companion/browser_memory.py \
+    usr/lib/tab-companion/tab_companion/power_profiles_page.py \
+    usr/lib/tab-companion/tab_companion/window.py \
+    usr/libexec/tab-companion-browser-memory-agent \
+    usr/libexec/tab-companion-browser-memory-setting \
+    usr/lib/systemd/user/tab-companion-browser-memory.service; do
+    install -Dm0644 "$startdir/overlay/$relative" "$pkgdir/$relative"
+  done
+  chmod 0755 "$pkgdir/usr/libexec/tab-companion-browser-memory-agent" \
+    "$pkgdir/usr/libexec/tab-companion-browser-memory-setting"
+  install -Dm0755 "$startdir/overlay/usr/local/libexec/x810-boot-switch-core" \
+    "$pkgdir/usr/local/libexec/x810-boot-switch-core"
+  install -Dm0755 "$startdir/overlay/usr/local/libexec/tab-companion-boot-status" \
+    "$pkgdir/usr/local/libexec/tab-companion-boot-status"
+  for relative in \
+    usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json \
+    usr/share/gnome-shell/extensions/spen-dock@agcarbajo.github.io/metadata.json \
+    usr/share/gnome-shell/extensions/tab-companion-haptics@agcarbajo/metadata.json; do
+    install -Dm0644 "$startdir/overlay/$relative" "$pkgdir/$relative"
+  done
+  for relative in \
+    usr/local/libexec/tab-companion-boot-switch \
+    usr/libexec/tab-companion-admin \
+    usr/share/polkit-1/actions/io.github.agcarbajo.TabCompanion.Admin.policy \
+    usr/share/polkit-1/actions/io.github.agcarbajo.TabCompanion.X810.policy \
+    usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/extension.js; do
+    if [[ ! -s "$pkgdir/$relative" ]]; then
+      printf 'Required Arch X810 dualboot file is missing from the shared bundle: %s\n' "$relative" >&2
+      return 1
+    fi
+  done
+  # This is a host-generated cache owned by glib2's shared schema hook, not
+  # package content. Keeping it in the archive makes pacman reject -U after
+  # the full system transaction has compiled the target's installed schemas.
+  rm -f "$pkgdir/usr/share/glib-2.0/schemas/gschemas.compiled"
+  # The shared bundle is assembled from the Fedora X810 stage. Do not install
+  # its Fedora port origin record on Arch; a future Arch device package may
+  # provide its own record when an Arch port-update feed is ready.
+  rm -f "$pkgdir/usr/share/tab-companion/port.json"
+
+  # GNOME Shell provides the authentication agent in the Arch GNOME image;
+  # the bundled Mate agent autostart uses a Fedora-only executable path.
+  rm -f "$pkgdir/etc/xdg/autostart/tab-companion-polkit-agent.desktop"
+
+  # The shared bundle is extracted from a source tarball created by makepkg's
+  # unprivileged builder, so some entries carry builder:builder ownership.
+  # Normalize the complete package tree while still under fakeroot; otherwise
+  # pacman preserves that uid for privileged boot-switch helpers and the
+  # rootfs archive audit correctly rejects them as non-root-owned.
+  chown -R root:root "$pkgdir"
+
+}

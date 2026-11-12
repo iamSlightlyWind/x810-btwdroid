@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "profiles": {
+    "power-saver": {"max_percent": 55, "cpu_boost": false, "gpu_boost": false},
+    "balanced": {"max_percent": 75, "cpu_boost": false, "gpu_boost": false},
+    "performance": {"max_percent": 100, "cpu_boost": true, "gpu_boost": true}
+  }
+}

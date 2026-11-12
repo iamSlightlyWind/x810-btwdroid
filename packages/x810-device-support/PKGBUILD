@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT
+pkgname=x810-device-support
+pkgver=0.1.0
+pkgrel=2
+pkgdesc='Conservative thermal and zram defaults for Samsung Galaxy Tab S9+ Wi-Fi (SM-X810)'
+arch=('any')
+url='https://github.com/iamSlightlyWind/x810-fedroid'
+license=('MIT')
+install='x810-device-support.install'
+depends=('systemd' 'python' 'zram-generator')
+backup=(
+  'etc/x810-thermal-limit.json'
+  'etc/x810-power-profile-tuning.json'
+  'etc/systemd/zram-generator.conf.d/80-x810.conf'
+)
+
+package() {
+  install -Dm0755 "$startdir/files/usr/libexec/x810-thermal-limit" \
+    "$pkgdir/usr/libexec/x810-thermal-limit"
+  install -Dm0644 "$startdir/files/usr/lib/systemd/system/x810-thermal-limit.service" \
+    "$pkgdir/usr/lib/systemd/system/x810-thermal-limit.service"
+  install -Dm0644 "$startdir/files/etc/x810-thermal-limit.json" \
+    "$pkgdir/etc/x810-thermal-limit.json"
+  install -Dm0644 "$startdir/files/etc/x810-power-profile-tuning.json" \
+    "$pkgdir/etc/x810-power-profile-tuning.json"
+  install -Dm0644 "$startdir/files/etc/systemd/zram-generator.conf.d/80-x810.conf" \
+    "$pkgdir/etc/systemd/zram-generator.conf.d/80-x810.conf"
+  install -Dm0644 "$startdir/LICENSE" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

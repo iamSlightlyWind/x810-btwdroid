@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Single local entry point for preparing and building the Windstation Arch image.
+# This script never connects to the tablet, installs to the build host, or flashes.
+set -euo pipefail
+umask 077
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+rootfs="$project_dir/work/rootfs"
+
+usage() {
+    cat <<'EOF'
+Usage: ./x810-build
+
+Build the local Arch Linux ARM GNOME rootfs and private archive. Required
+downloaded source assets and credentials live under ignored cache/; see
+docs/PORT-PLAN.md. Existing work/rootfs is reused and never deleted.
+EOF
+}
+
+if [[ "${1:-}" == --help || "${1:-}" == -h ]]; then
+    usage
+    exit 0
+fi
+if (($#)); then
+    usage >&2
+    exit 2
+fi
+
+die() {
+    printf 'ERROR: %s\n' "$*" >&2
+    exit 1
+}
+
+required_commands=(podman python3 gpg zstd tar sha256sum find grep)
+for command in "${required_commands[@]}"; do
+    command -v "$command" >/dev/null 2>&1 || die "required host command is missing: $command"
+done
+
+required_inputs=(
+    cache/ArchLinuxARM-aarch64-latest.tar.gz
+    cache/ArchLinuxARM-aarch64-latest.tar.gz.sig
+    cache/modules/7.2.0-gts9wifi
+    cache/ssh-authorized_keys
+    cache/windstation-connectivity.tar.gz
+    ../x810-fedroid/tools/bdftool.py
+)
+for relative in "${required_inputs[@]}"; do
+    [[ -e "$project_dir/$relative" ]] || die "required local build input is missing: $relative"
+done
+[[ -s "$project_dir/cache/ssh-authorized_keys" ]] \
+    || die "the local authorized public-key file is empty"
+[[ -s "$project_dir/cache/windstation-connectivity.tar.gz" ]] \
+    || die "the private connectivity snapshot is empty"
+
+[[ ! -L "$project_dir/work" ]] || die "refusing symlinked work directory"
+[[ ! -e "$rootfs" || -d "$rootfs" ]] || die "work/rootfs exists but is not a directory"
+[[ ! -L "$rootfs" ]] || die "refusing symlinked work/rootfs"
+
+printf '%s\n' 'Building the local Arch rootfs only; Windstation will not be contacted.'
+"$project_dir/tools/build-builder-image.sh"
+
+if [[ -f "$rootfs/etc/pacman.conf" && -d "$rootfs/etc/pacman.d" ]]; then
+    printf '%s\n' 'Reusing the existing staged rootfs; it will not be deleted.'
+    "$project_dir/tools/verify-alarm-rootfs.sh"
+elif [[ -d "$rootfs" ]] && find "$rootfs" -mindepth 1 -print -quit | grep -q .; then
+    die "work/rootfs is non-empty but not a recognized staged Arch rootfs; move it aside explicitly"
+else
+    "$project_dir/tools/prepare-rootfs.sh"
+fi
+
+# Install the networking and administration base before importing private
+# connectivity state. upgrade-rootfs always performs a full -Syu transaction.
+"$project_dir/tools/upgrade-rootfs.sh" \
+    networkmanager wpa_supplicant tailscale sudo zram-generator
+"$project_dir/tools/stage-x810-modules.sh"
+"$project_dir/tools/stage-x810-wifi.sh"
+"$project_dir/tools/import-connectivity-state.sh"
+"$project_dir/tools/configure-ssh-rootfs.sh"
+"$project_dir/tools/build-packages.sh"
+"$project_dir/tools/install-gnome-profile.sh"
+
+printf '\n%s\n' 'Build complete. The private archive is in ignored out/private-rootfs/.'
+printf '%s\n' 'No package was installed on devnode; Windstation was not accessed, written, or rebooted.'
