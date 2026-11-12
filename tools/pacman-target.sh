@@ -22,6 +22,9 @@ rootfs="$project_dir/work/rootfs"
 
 [[ -d "$rootfs/etc/pacman.d" ]] || { echo "Missing prepared target rootfs: $rootfs" >&2; exit 1; }
 mkdir -p "$podman_root" "$podman_runroot"
+# Keep temporary builder-only pacman configuration in the ignored project tmp
+# tree even when Podman storage roots are overridden outside the repository.
+mkdir -p "$project_dir/tmp"
 mkdir -p "$project_dir/out/packages"
 
 builder_conf_dir=""
