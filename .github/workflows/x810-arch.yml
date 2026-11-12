@@ -101,11 +101,29 @@ jobs:
           tools/build-builder-image.sh
           tools/build-packages.sh
 
+      - name: Prepare artifact-safe package filenames
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          packages=(out/packages/*.pkg.tar.zst)
+          [[ ${#packages[@]} -eq 3 ]] || {
+            echo "Expected three package archives, found ${#packages[@]}" >&2
+            exit 1
+          }
+          mkdir -p out/package-artifact
+          for package in "${packages[@]}"; do
+            filename="${package##*/}"
+            # GitHub artifact paths reject ':'; pacman package filenames may
+            # contain it for an epoch (Brave uses epoch 1). Rename only the
+            # downloadable copy; package archive contents remain unchanged.
+            cp -- "$package" "out/package-artifact/${filename//:/_}"
+          done
+
       - name: Upload packages for local rootfs staging
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: x810-btwdroid-packages
-          path: out/packages/*.pkg.tar.zst
+          path: out/package-artifact/*.pkg.tar.zst
           if-no-files-found: error
           retention-days: 3
           compression-level: 0
