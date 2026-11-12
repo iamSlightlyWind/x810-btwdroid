@@ -54,6 +54,7 @@ class ArchWorkflowTests(unittest.TestCase):
             "tools/test-arch-port-release.py",
             "tools/build-packages.sh",
             "tools/make-arch-port-update-bundle.py",
+            "filename//:/_",
             "name: x810-arch-packages",
             "name: x810-port-update",
         ):

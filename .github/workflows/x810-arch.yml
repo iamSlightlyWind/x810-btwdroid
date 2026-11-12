@@ -148,7 +148,11 @@ jobs:
             count="$(find out/packages -maxdepth 1 -type f -name "$name-*.pkg.tar.zst" | wc -l)"
             [[ "$count" -eq 1 ]] || { echo "Expected exactly one $name package, found $count." >&2; exit 1; }
           done
-          cp -- out/packages/*.pkg.tar.zst _ci/packages/
+          for package in out/packages/*.pkg.tar.zst; do
+            filename="${package##*/}"
+            # GitHub artifacts reject colons in paths; Brave uses a pacman epoch.
+            cp -- "$package" "_ci/packages/${filename//:/_}"
+          done
           (cd _ci/packages && sha256sum ./*.pkg.tar.zst > SHA256SUMS)
           support_package="$(find _ci/packages -maxdepth 1 -type f -name 'x810-device-support-*.pkg.tar.zst' -print -quit)"
           python3 tools/make-arch-port-update-bundle.py --package "$support_package" --build-info packages/x810-device-support/files/usr/share/tab-companion/port-build.json --output _ci/update/update.zip
