@@ -107,6 +107,7 @@ jobs:
           bash -n tools/*.sh rootfs/*.sh
           python3 -m compileall -q tools
           python3 tools/test-x810-install.py
+          python3 tools/test-installer-common.py
           python3 tools/test-fetch-x810-kernel.py
           python3 tools/test-target-pacman-policy.py
           python3 tools/test-rootfs-image-profile.py
@@ -196,6 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/test-x810-install.py
+          python3 tools/test-installer-common.py
           python3 tools/test-rootfs-image-profile.py
           python3 tools/test-verify-rootfs-archive.py
 

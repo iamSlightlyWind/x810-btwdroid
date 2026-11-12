@@ -202,7 +202,13 @@ class InstallerTests(unittest.TestCase):
             self.assertNotIn(forbidden, joined)
 
     def test_partition_validation_requires_correct_label_guid_and_unmounted_target(self):
-        info = """Partition number: 35\nPartition GUID code: 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (Linux filesystem)\nPartition name: 'linuxroot'\n"""
+        info = """Partition number: 35
+Partition GUID code: 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (Linux filesystem)
+Partition unique GUID: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
+First sector: 4000000
+Last sector: 5700000
+Partition name: 'linuxroot'
+"""
         mapping = {
             ("readlink", "-f", installer.LINUXROOT): (0, installer.LINUXROOT_NODE + "\n"),
             ("blockdev", "--getsize64", installer.LINUXROOT): (0, str(64 * 1024**3) + "\n"),
@@ -221,6 +227,51 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "already mounted"):
             installer.validate_partition(FakeClient(mapping), 1024)
 
+    def test_target_is_revalidated_immediately_before_format_and_drift_never_formats(self):
+        valid_info = (
+            "Partition number: 35\n"
+            "Partition GUID code: 0FC63DAF-8483-4772-8E79-3D69D8477DE4 (Linux filesystem)\n"
+            "Partition unique GUID: 0FC63DAF-8483-4772-8E79-3D69D8477DE4\n"
+            "First sector: 4000000\n"
+            "Last sector: 5700000\n"
+            "Partition name: 'linuxroot'\n"
+        )
+
+        def target_mapping(*, node=None, size=64 * 1024**3, label="linuxroot",
+                           filesystem="ext4", info=valid_info, mounts="rootfs / rootfs rw 0 0\n"):
+            return {
+                ("readlink", "-f", installer.LINUXROOT):
+                    (0, (node or installer.LINUXROOT_NODE) + "\n"),
+                ("blockdev", "--getsize64", installer.LINUXROOT): (0, str(size) + "\n"),
+                ("toybox", "blkid", "-s", "LABEL", installer.LINUXROOT):
+                    (0, f'{installer.LINUXROOT}: LABEL="{label}"\n'),
+                ("toybox", "blkid", "-s", "TYPE", installer.LINUXROOT):
+                    (0, f'{installer.LINUXROOT}: TYPE="{filesystem}"\n'),
+                ("sgdisk", "--info=35", "/dev/block/sda"): (0, info),
+                ("cat", "/proc/mounts"): (0, mounts),
+            }
+
+        baseline, checks = installer.validate_partition(FakeClient(target_mapping()), 1024)
+        self.assertFalse(any(check.state == "STOP" for check in checks), checks)
+        bundle = installer.InstallBundle(Path("/private/rootfs.tar.zst"), "0" * 64, 1024, "test")
+
+        drift_cases = (
+            ("wrong resolved device", target_mapping(node="/dev/block/sda34")),
+            ("changed exact size", target_mapping(size=65 * 1024**3)),
+            ("changed filesystem label", target_mapping(label="userdata")),
+            ("changed filesystem type", target_mapping(filesystem="f2fs")),
+            ("changed GPT name", target_mapping(info=valid_info.replace("linuxroot", "userdata"))),
+            ("changed GPT type", target_mapping(info=valid_info.replace(
+                installer.LINUXROOT_TYPE_GUID, "1B81E7E6-F50D-419B-A739-2AEEF8DA3335"))),
+            ("mounted target", target_mapping(mounts="/dev/block/sda35 /mnt/linuxroot ext4 rw 0 0\n")),
+        )
+        for label, mapping in drift_cases:
+            with self.subTest(drift=label):
+                client = FakeClient(mapping)
+                with self.assertRaises(RuntimeError):
+                    installer.format_and_install(client, bundle, Path("/not-used"), {}, baseline)
+                self.assertNotIn(installer.linuxroot_format_args(), client.calls)
+
     def test_plan_only_runs_read_only_checks_without_backup_or_block_write(self):
         props = {
             "ro.twrp.version": "3.7.1_12-0", "ro.product.device": "gts9p",
@@ -228,7 +279,12 @@ class InstallerTests(unittest.TestCase):
             "ro.boot.flash.locked": "0", "ro.boot.vbmeta.device_state": "unlocked",
             "ro.boot.verifiedbootstate": "orange",
         }
-        info = "Partition GUID code: 0FC63DAF-8483-4772-8E79-3D69D8477DE4\nPartition name: 'linuxroot'\n"
+        info = (
+            "Partition GUID code: 0FC63DAF-8483-4772-8E79-3D69D8477DE4\n"
+            "Partition unique GUID: 0FC63DAF-8483-4772-8E79-3D69D8477DE4\n"
+            "First sector: 4000000\nLast sector: 5700000\n"
+            "Partition name: 'linuxroot'\n"
+        )
         calls = []
         def runner(argv, timeout=30):
             calls.append(argv)

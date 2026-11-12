@@ -31,6 +31,12 @@ from pathlib import Path
 from typing import Any, Callable
 
 
+from x810_installer_common import (
+    ADBClient as CommonADBClient, Check, adb_target, command, hash_password,
+    output, parse_sgdisk_info, sha256_file, twrp_identity as common_twrp_identity,
+)
+
+
 EXPECTED_MODEL = "SM-X810"
 EXPECTED_TWRP_ALIAS = "SM-X816B"  # observed generic recovery property on this X810
 EXPECTED_CODENAMES = {"gts9p", "gts9pwifi"}
@@ -55,34 +61,11 @@ INSTALL_MOUNT = "/tmp/x810-arch-linuxroot"
 
 
 @dataclass
-class Check:
-    label: str
-    state: str
-    detail: str
-
-
-@dataclass
 class InstallBundle:
     archive: Path
     sha256: str
     size_bytes: int
     version: str
-
-
-def command(argv: list[str], timeout: int = 30) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(argv, text=True, capture_output=True, timeout=timeout, check=False)
-
-
-def output(result: subprocess.CompletedProcess[str]) -> str:
-    return (result.stdout + "\n" + result.stderr).strip()
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(4 * 1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def latest_release(opener=urllib.request.urlopen) -> dict[str, Any]:
@@ -298,61 +281,8 @@ def _validate_cached_manifest(manifest: dict[str, Any], tag: Any) -> None:
         raise ValueError("cached manifest has invalid rootfs metadata")
 
 
-def adb_devices(adb_output: str) -> list[tuple[str, str]]:
-    states = {"device", "recovery", "sideload", "unauthorized", "offline"}
-    result: list[tuple[str, str]] = []
-    for line in adb_output.splitlines()[1:]:
-        fields = line.split()
-        if len(fields) >= 2 and fields[1] in states:
-            result.append((fields[0], fields[1]))
-    return result
-
-
-def adb_target(adb: str, serial: str | None,
-               runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> tuple[str, str]:
-    result = runner([adb, "devices", "-l"], timeout=15)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "adb devices failed")
-    rows = adb_devices(result.stdout)
-    if serial:
-        rows = [row for row in rows if row[0] == serial]
-        if not rows:
-            raise RuntimeError(f"ADB serial {serial} is not connected; run `adb devices -l`")
-    elif len(rows) > 1:
-        raise RuntimeError("multiple ADB targets are attached; rerun with --serial SERIAL")
-    elif not rows:
-        raise RuntimeError("no ADB target is attached; connect Windstation by USB and open TWRP")
-    if len(rows) != 1:
-        raise RuntimeError("ADB target selection is ambiguous")
-    target, state = rows[0]
-    if state != "recovery":
-        raise RuntimeError(
-            f"expected TWRP ADB recovery, got {state}; enter TWRP manually. "
-            "This installer never reboots the tablet."
-        )
-    return target, state
-
-
-class ADBClient:
-    """Injectable ADB transport. Block writes are not exposed as a generic API."""
-
-    def __init__(self, adb: str, serial: str,
-                 runner: Callable[..., subprocess.CompletedProcess[str]] = command):
-        self.adb = adb
-        self.serial = serial
-        self.runner = runner
-
-    def run(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-        return self.runner([self.adb, "-s", self.serial, *args], timeout=timeout)
-
-    def shell(self, *args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
-        return self.run("shell", *args, timeout=timeout)
-
-    def push(self, source: Path, destination: str, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-        return self.run("push", str(source), destination, timeout=timeout)
-
-    def pull(self, source: str, destination: Path, timeout: int = 120) -> subprocess.CompletedProcess[str]:
-        return self.run("pull", source, str(destination), timeout=timeout)
+class ADBClient(CommonADBClient):
+    """Common ADB transport plus the Arch zstd rootfs stream."""
 
     def stream_rootfs(self, archive: Path, mountpoint: str, timeout: int = 3600) -> None:
         """Decompress on the host; stream tar into TWRP Toybox without staging a huge file."""
@@ -383,68 +313,13 @@ class ADBClient:
             raise RuntimeError(detail or f"ADB tar extraction exited with status {received.returncode}")
 
 
-def _getprop(client: ADBClient, key: str) -> str:
-    result = client.shell("getprop", key)
-    return result.stdout.strip().replace("\r", "") if result.returncode == 0 else ""
-
-
 def twrp_identity(client: ADBClient) -> tuple[dict[str, str], list[Check]]:
-    values: dict[str, str] = {}
-    for key, prop in (
-        ("twrp", "ro.twrp.version"),
-        ("device", "ro.product.device"),
-        ("model", "ro.boot.em.model"),
-        ("bootloader", "ro.bootloader"),
-        ("flash_locked", "ro.boot.flash.locked"),
-        ("vbmeta_state", "ro.boot.vbmeta.device_state"),
-        ("verifiedbootstate", "ro.boot.verifiedbootstate"),
-    ):
-        values[key] = _getprop(client, prop)
-    uid = client.shell("id", "-u")
-    values["uid"] = uid.stdout.strip() if uid.returncode == 0 else ""
-    cmdline = client.shell("cat", "/proc/cmdline")
-    values["cmdline"] = cmdline.stdout.strip() if cmdline.returncode == 0 else ""
-
-    checks = [Check("ADB recovery", "OK", f"{client.serial} (TWRP)")]
-    if values["twrp"]:
-        checks.append(Check("TWRP", "OK", values["twrp"]))
-    else:
-        checks.append(Check("TWRP", "STOP", "ro.twrp.version is empty"))
-    if values["device"] in EXPECTED_CODENAMES:
-        checks.append(Check("Recovery codename", "OK", values["device"]))
-    else:
-        checks.append(Check("Recovery codename", "STOP", f"expected gts9p/gts9pwifi, got {values['device'] or '?'}"))
-    model_evidence = (
-        values["model"] in {EXPECTED_MODEL, EXPECTED_TWRP_ALIAS, ""}
-        and values["bootloader"].startswith(EXPECTED_BOOTLOADER_PREFIX)
-        and values["device"] in EXPECTED_CODENAMES
+    """Apply the shared X810 identity checks and Arch TWRP alias policy."""
+    return common_twrp_identity(
+        client, "recovery", expected_model=EXPECTED_MODEL,
+        codenames=EXPECTED_CODENAMES, bootloader_prefix=EXPECTED_BOOTLOADER_PREFIX,
+        model_aliases={EXPECTED_TWRP_ALIAS}, require_bootloader=True,
     )
-    if model_evidence:
-        suffix = f"; generic TWRP model alias {values['model']} accepted only with X810 bootloader/codename" if values["model"] == EXPECTED_TWRP_ALIAS else ""
-        checks.append(Check("Tablet identity", "OK", f"bootloader {values['bootloader']}{suffix}"))
-    else:
-        checks.append(Check(
-            "Tablet identity", "STOP",
-            f"requires SM-X810 bootloader plus gts9p codename; got {values['model'] or '?'} / "
-            f"{values['bootloader'] or '?'} / {values['device'] or '?'}",
-        ))
-    locked = values["flash_locked"] == "1" or values["vbmeta_state"].lower() == "locked"
-    unlocked_evidence = (
-        values["flash_locked"] == "0"
-        or values["vbmeta_state"].lower() == "unlocked"
-        or values["verifiedbootstate"].lower() == "orange"
-    )
-    if locked:
-        checks.append(Check("Bootloader", "STOP", "TWRP properties report a locked bootloader"))
-    elif unlocked_evidence:
-        checks.append(Check("Bootloader", "OK", "TWRP properties report unlocked/orange state"))
-    else:
-        checks.append(Check("Bootloader", "STOP", "TWRP properties do not prove an unlocked bootloader"))
-    if values["uid"] == "0":
-        checks.append(Check("Recovery privileges", "OK", "ADB shell is root"))
-    else:
-        checks.append(Check("Recovery privileges", "STOP", f"ADB shell uid is {values['uid'] or 'unknown'}, expected 0"))
-    return values, checks
 
 
 def _shell_text(result: subprocess.CompletedProcess[str], label: str) -> str:
@@ -483,10 +358,10 @@ def validate_partition(client: ADBClient, archive_bytes: int) -> tuple[dict[str,
     if label != LINUXROOT_LABEL or filesystem != "ext4":
         raise RuntimeError(f"expected existing ext4 label linuxroot; found label={label!r}, type={filesystem!r}")
     info = _shell_text(client.shell("sgdisk", f"--info={LINUXROOT_PARTITION_NUMBER}", "/dev/block/sda"), "read linuxroot GPT entry")
-    if not re.search(r"(?im)^\s*Partition name:\s*['\"]linuxroot['\"]\s*$", info):
-        raise RuntimeError("GPT entry 35 is not named linuxroot")
-    type_match = re.search(r"(?im)^\s*Partition GUID code:\s*([0-9a-f-]{36})", info)
-    if not type_match or type_match.group(1).upper() != LINUXROOT_TYPE_GUID:
+    parsed_gpt = parse_sgdisk_info(info)
+    if parsed_gpt is None or parsed_gpt["name"] != LINUXROOT_LABEL:
+        raise RuntimeError("GPT entry 35 is not named linuxroot or could not be parsed")
+    if parsed_gpt["type_guid"] != LINUXROOT_TYPE_GUID:
         raise RuntimeError("GPT entry 35 does not have the expected Linux filesystem type GUID")
     mounts = _shell_text(client.shell("cat", "/proc/mounts"), "read active mounts")
     for line in mounts.splitlines():
@@ -500,6 +375,25 @@ def validate_partition(client: ADBClient, archive_bytes: int) -> tuple[dict[str,
         Check("Mount state", "OK", "target filesystem is not mounted"),
     ))
     return facts, checks
+
+
+def revalidate_partition_before_format(client: ADBClient, expected: dict[str, Any],
+                                       archive_bytes: int) -> dict[str, Any]:
+    """Repeat every target check at the destructive boundary and reject drift.
+
+    The earlier preflight happens before prompts and a GPT metadata backup. The
+    selected block node must still be the exact same partition when mke2fs is
+    about to run; matching only a minimum size would allow a changed symlink or
+    resized/replaced entry 35 to redirect the destructive operation.
+    """
+    current, _ = validate_partition(client, archive_bytes)
+    for field in ("node", "size_bytes", "label", "filesystem", "gpt"):
+        if current.get(field) != expected.get(field):
+            raise RuntimeError(
+                f"linuxroot {field.replace('_', ' ')} changed since preflight; "
+                "refusing to format"
+            )
+    return current
 
 
 def preflight_twrp_tools(client: ADBClient) -> list[Check]:
@@ -592,17 +486,6 @@ def write_gpt_backup(client: ADBClient, project: Path, identity: dict[str, str],
     finally:
         # This unlinks a file in recovery's RAM tmpfs; it does not touch a block partition.
         client.shell("rm", "-f", remote)
-
-
-def hash_password(password: str) -> str:
-    if not password or "\n" in password or "\r" in password or "\x00" in password:
-        raise ValueError("password must be non-empty and contain no newline or NUL")
-    result = subprocess.run(["openssl", "passwd", "-6", "-stdin"], input=password + "\n",
-                            text=True, capture_output=True, timeout=15, check=False)
-    hashed = result.stdout.strip()
-    if result.returncode != 0 or not hashed.startswith("$6$"):
-        raise RuntimeError("OpenSSL did not produce a SHA-512-crypt hash")
-    return hashed
 
 
 def prompt_install_details(password_reader: Callable[[str], str] = getpass.getpass,
@@ -824,10 +707,10 @@ def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
 
 
 def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
-                       account_details: dict[str, str]) -> None:
-    size = _shell_text(client.shell("blockdev", "--getsize64", LINUXROOT), "recheck linuxroot size")
-    if int(size) < max(LINUXROOT_MIN_BYTES, bundle.size_bytes):
-        raise RuntimeError("linuxroot size changed or is too small immediately before format")
+                       account_details: dict[str, str], expected_partition: dict[str, Any]) -> None:
+    # Re-resolve the PARTLABEL, inspect its exact capacity, ext4 identity,
+    # GPT entry, and mount state immediately before the only block write.
+    revalidate_partition_before_format(client, expected_partition, bundle.size_bytes)
     makefs = client.shell(*linuxroot_format_args(), timeout=600)
     if makefs.returncode != 0:
         raise RuntimeError(f"formatting only {LINUXROOT} failed: {output(makefs)}")
@@ -967,7 +850,7 @@ def run_install(project: Path, bundle: InstallBundle, serial: str | None = None,
         if entered != FORMAT_CONFIRMATION:
             print("Confirmation did not match; linuxroot was not formatted.")
             return 1
-        format_and_install(client, bundle, backup, account_details)
+        format_and_install(client, bundle, backup, account_details, partition)
         print(f"\nArch rootfs extracted, fresh {account_details['username']} account created, and read-only filesystem verification passed.")
         print(f"Install record / GPT metadata backup: {backup}")
         print("No reboot was performed. Manually choose when to leave TWRP after reviewing the result.")
