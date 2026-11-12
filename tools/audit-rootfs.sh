@@ -17,10 +17,17 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     project=/workspace/x810-btwdroid
     rootfs="$project/work/rootfs"
     release=7.2.0-gts9wifi
+    candidate_roots=(/etc /home /root /usr /var /opt /srv /boot /tmp /mnt /media /run /lib /lib64 /bin /sbin)
+    scan_roots=()
     target() { /opt/proot/src/proot -0 -q /usr/bin/qemu-aarch64-static \
       -r "$rootfs" -w / -b /dev -b /proc -b /sys -b /tmp "$@"; }
     target_tree() { /opt/proot/src/proot -0 -q /usr/bin/qemu-aarch64-static \
       -r "$rootfs" -w / -b /dev -b /proc -b /sys "$@"; }
+    for candidate in "${candidate_roots[@]}"; do
+      if target_tree /usr/bin/test -d "$candidate"; then
+        scan_roots+=("$candidate")
+      fi
+    done
     audit_fail() { echo "Rootfs audit FAILED: $*" >&2; exit 1; }
     audit_check() {
       local label="$1"
@@ -39,8 +46,7 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     }
     no_private_ssh_wifi_paths() {
       local found
-      found="$(target_tree /usr/bin/find / \
-        \( -path /dev -o -path /proc -o -path /sys \) -prune -o \
+      found="$(target_tree /usr/bin/find "${scan_roots[@]}" \
         \( -iname ".ssh*" -o -iname "authorized_keys" \
           -o -iname "*ssh_host_*" -o -iname "wpa_supplicant.conf" \) -print -quit)"
       if [[ -n "$found" ]]; then

@@ -21,16 +21,27 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     rootfs=/work/rootfs
     target() { /opt/proot/src/proot -0 -q /usr/bin/qemu-aarch64-static \
       -r "$rootfs" -w / -b /dev -b /proc -b /sys "$@"; }
+    candidate_roots=(/etc /home /root /usr /var /opt /srv /boot /tmp /mnt /media /run /lib /lib64 /bin /sbin)
+    scan_roots=()
+    for candidate in "${candidate_roots[@]}"; do
+      if target /usr/bin/test -d "$candidate"; then
+        scan_roots+=("$candidate")
+      fi
+    done
     find_sensitive() {
-      target /usr/bin/find / \
-        \( -path /dev -o -path /proc -o -path /sys \) -prune -o \
+      target /usr/bin/find "${scan_roots[@]}" \
         \( -iname ".ssh*" -o -iname "authorized_keys" \
           -o -iname "*ssh_host_*" -o -iname "wpa_supplicant.conf" \) "$@"
     }
 
     # The profile package transaction runs after SSH configuration and can
     # recreate generated host keys or bootstrap credential directories.
-    find_sensitive -prune -exec /usr/bin/rm -rf -- {} +
+    sensitive_list="/tmp/windstation-private-paths-$$"
+    find_sensitive -prune -print0 > "$sensitive_list"
+    while IFS= read -r -d "" sensitive_path; do
+      target /usr/bin/rm -rf -- "$sensitive_path"
+    done < "$sensitive_list"
+    rm -f -- "$sensitive_list"
     target /usr/bin/rm -rf -- /var/lib/tailscale
     if target /usr/bin/test -d /etc/NetworkManager/system-connections; then
       target /usr/bin/find /etc/NetworkManager/system-connections \

@@ -158,7 +158,9 @@ class RootfsImageProfileTests(unittest.TestCase):
                        'rm -rf -- /var/lib/tailscale',
                        '/etc/NetworkManager/system-connections'):
             self.assertIn(marker, scrub)
-        self.assertIn('target /usr/bin/find / \\', scrub)
+        self.assertIn('target /usr/bin/find "${scan_roots[@]}"', scrub)
+        self.assertIn('find_sensitive -prune -print0 > "$sensitive_list"', scrub)
+        self.assertIn('target /usr/bin/rm -rf -- "$sensitive_path"', scrub)
         self.assertIn("Private SSH, Wi-Fi, or Tailscale state remains", scrub)
 
     def test_pacman_policy_disables_only_filesystem_sandbox(self):
