@@ -266,7 +266,10 @@ class InstallerTests(unittest.TestCase):
 
         bundle = installer.InstallBundle(Path("/private/rootfs.tar.zst"), "0" * 64, 1024, "test")
         with tempfile.TemporaryDirectory() as tmp:
-            status = installer.run_install(Path(tmp), bundle, plan_only=True, runner=runner)
+            # The injected runner emulates the ADB CLI; the test should not
+            # require a real adb executable to be installed on the host/CI.
+            with patch.object(installer.shutil, "which", side_effect=lambda name: f"/fake/{name}"):
+                status = installer.run_install(Path(tmp), bundle, plan_only=True, runner=runner)
         self.assertEqual(status, 0)
         commands = [" ".join(argv[4:]) for argv in calls if len(argv) > 4 and argv[3] == "shell"]
         self.assertFalse(any(item.startswith("mke2fs ") or item.startswith("sgdisk --backup") for item in commands), commands)

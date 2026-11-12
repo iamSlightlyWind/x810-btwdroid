@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -175,12 +176,21 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertNotIn("'", inner_script)
 
     def test_builder_failure_leaves_target_pacman_conf_unchanged(self):
-        project = TOOLS.parent
-        pacman_target = TOOLS / "pacman-target.sh"
-        target_conf = project / "work/rootfs/etc/pacman.conf"
-        original = target_conf.read_bytes()
         with tempfile.TemporaryDirectory() as temporary:
             temp = Path(temporary)
+            # Exercise the real wrapper in an isolated project fixture rather
+            # than requiring this test to have a private, staged work/rootfs.
+            project = temp / "project"
+            test_tools = project / "tools"
+            test_tools.mkdir(parents=True)
+            for name in ("pacman-target.sh", "configure-target-pacman.py"):
+                shutil.copy2(TOOLS / name, test_tools / name)
+            rootfs = project / "work/rootfs"
+            (rootfs / "etc/pacman.d").mkdir(parents=True)
+            target_conf = rootfs / "etc/pacman.conf"
+            original = b"[options]\nArchitecture = auto\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n"
+            target_conf.write_bytes(original)
+
             fake_bin = temp / "bin"
             fake_bin.mkdir()
             captured = temp / "builder-pacman.conf"
@@ -204,7 +214,7 @@ class RootfsImageProfileTests(unittest.TestCase):
             environment["PATH"] = f"{fake_bin}:{environment.get('PATH', '')}"
             environment["CAPTURE_BUILDER_CONF"] = str(captured)
             result = subprocess.run(
-                [str(pacman_target), "--builder-mode", "-Q", "pacman"],
+                [str(test_tools / "pacman-target.sh"), "--builder-mode", "-Q", "pacman"],
                 check=False,
                 env=environment,
                 text=True,
