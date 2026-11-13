@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: MIT
-"""Power-profile, CPU temperature, and memory controls for Fedora X810."""
+"""Power-profile, CPU temperature, and memory controls for X810."""
 
 import json
 import os

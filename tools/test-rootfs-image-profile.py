@@ -21,7 +21,7 @@ SPEC.loader.exec_module(verifier)
 
 
 class RootfsImageProfileTests(unittest.TestCase):
-    def test_fedora_style_python_installer_and_internal_build_orchestration(self):
+    def test_python_installer_and_internal_build_orchestration(self):
         project = TOOLS.parent
         installer = project / "tools/x810-install"
         self.assertTrue(installer.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3"))

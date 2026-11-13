@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""Tab Companion Fedora/X810 backend: write only the 4 boot-set partitions."""
+"""Tab Companion X810 backend: write only the four boot-set partitions."""
 import json
 import os
 import pathlib

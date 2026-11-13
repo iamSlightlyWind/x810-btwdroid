@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.machinery
 import importlib.util
+import contextlib
 import io
 import hashlib
 import json
@@ -121,16 +122,24 @@ class ProvisioningClient:
 
 
 class InstallerTests(unittest.TestCase):
-    def test_plan_only_is_allowed_without_interactive_tty(self):
-        bundle = installer.InstallBundle(Path("/private/rootfs.tar.zst"), "0" * 64, 1024, "test")
+    def test_install_requires_interactive_tty(self):
+        stderr = io.StringIO()
         with patch.object(sys, "argv", [str(SCRIPT), "install", "--plan-only"]), \
              patch.object(sys, "stdin", io.StringIO("")), \
-             patch.object(sys, "stdout", io.StringIO()), \
-             patch.object(installer, "latest_release", return_value={"tag_name": "x810-arch-build-1"}), \
-             patch.object(installer, "download_release_install_set", return_value=bundle), \
-             patch.object(installer, "run_install", return_value=0) as run_install:
+             patch.object(sys, "stdout", io.StringIO()):
+            # Guided install prompts must never run without a real terminal.
+            self.assertEqual(installer.main(), 2)
+
+    def test_default_cli_starts_preflighted_guided_flow_without_download_first(self):
+        class TTY(io.StringIO):
+            def isatty(self):
+                return True
+        with patch.object(sys, "argv", [str(SCRIPT)]), \
+             patch.object(sys, "stdin", TTY()), patch.object(sys, "stdout", TTY()), \
+             patch.object(installer, "run_install", return_value=0) as run_install, \
+             patch.object(installer, "latest_release", side_effect=AssertionError("release lookup belongs after device preflight")):
             self.assertEqual(installer.main(), 0)
-        run_install.assert_called_once_with(SCRIPT.resolve().parents[1], bundle, None, True)
+        run_install.assert_called_once_with(SCRIPT.resolve().parents[1], None, None, False)
 
     def test_extracted_rootfs_checks_gdm_alias_and_graphical_target_dependency(self):
         root = "/mnt/linuxroot"
@@ -309,6 +318,37 @@ class InstallerTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "expected TWRP ADB recovery"):
             installer.adb_target("adb", None, runner)
 
+    def test_install_stops_on_failed_android_preflight_before_rootfs_download(self):
+        failed = [installer.Check("Android root", "STOP", "su unavailable")]
+        output = io.StringIO()
+        with patch.object(installer.platform, "system", return_value="Linux"), \
+             patch.object(installer.shutil, "which", side_effect=lambda name: f"/fake/{name}"), \
+             patch.object(installer, "adb_target", return_value=("serial", "device")), \
+             patch.object(installer, "android_preflight", return_value=("serial", failed)), \
+             patch.object(installer, "open_install_bundle") as open_bundle, \
+             contextlib.redirect_stdout(output):
+            status = installer.run_install(Path("/repo"), None)
+        self.assertEqual(status, 2)
+        open_bundle.assert_not_called()
+        self.assertIn("Android root", output.getvalue())
+        self.assertIn("installer made no tablet changes", output.getvalue())
+
+    def test_install_stops_on_unverified_twrp_before_rootfs_download(self):
+        identity = {"device": "gts9p", "bootloader": "X810XXS5CYG1", "twrp": "3.7.1"}
+        failed = [installer.Check("Tablet identity", "STOP", "not the target")]
+        output = io.StringIO()
+        with patch.object(installer.platform, "system", return_value="Linux"), \
+             patch.object(installer.shutil, "which", side_effect=lambda name: f"/fake/{name}"), \
+             patch.object(installer, "adb_target", return_value=("serial", "recovery")), \
+             patch.object(installer, "ADBClient"), \
+             patch.object(installer, "twrp_identity", return_value=(identity, failed)), \
+             patch.object(installer, "open_install_bundle") as open_bundle, \
+             contextlib.redirect_stdout(output):
+            status = installer.run_install(Path("/repo"), None)
+        self.assertEqual(status, 2)
+        open_bundle.assert_not_called()
+        self.assertIn("no download or tablet changes", output.getvalue())
+
     def test_multiple_adb_targets_need_explicit_serial(self):
         def runner(argv, timeout=30):
             return subprocess.CompletedProcess(argv, 0,
@@ -480,16 +520,13 @@ Partition name: 'linuxroot'
                 return subprocess.CompletedProcess(argv, 0, info, "")
             if args == ("cat", "/proc/mounts"):
                 return subprocess.CompletedProcess(argv, 0, "rootfs / rootfs rw 0 0\n", "")
-            if args[:2] == ("sh", "-c"):
-                command_words = shlex.split(args[2])
-                if len(command_words) == 1:
-                    command_words = shlex.split(command_words[0])
-                if command_words[:2] != ["command", "-v"]:
-                    return subprocess.CompletedProcess(argv, 2, "", "invalid fake preflight command")
-                tool = command_words[2]
-                if tool not in {"sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot", "dd"}:
+            if args[:2] == ("command", "-v"):
+                tool = args[2]
+                if tool not in {"sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot", "dd", "sh", "test", "blkid"}:
                     return subprocess.CompletedProcess(argv, 1, "", "")
                 return subprocess.CompletedProcess(argv, 0, "/system/bin/" + tool + "\n", "")
+            if args == ("toybox", "blkid", "--help"):
+                return subprocess.CompletedProcess(argv, 0, "usage: blkid", "")
             if args == ("toybox", "blkid", "-s", "LABEL", installer.LINUXROOT):
                 return subprocess.CompletedProcess(argv, 0, f'{installer.LINUXROOT}: LABEL="linuxroot"\n', "")
             if args == ("cat", "/proc/cmdline"):

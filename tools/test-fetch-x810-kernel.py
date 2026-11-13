@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for the exact Fedora release/module provenance passed to Arch builds."""
+"""Tests for verified X810 kernel release/module provenance used by Arch builds."""
 
 from __future__ import annotations
 

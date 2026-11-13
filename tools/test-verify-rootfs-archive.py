@@ -143,7 +143,7 @@ class ArchiveFixture:
             self.add_file(
                 archive,
                 "usr/local/libexec/x810-boot-switch-core",
-                (b"archarm snapshot_current_linux" if self.arch_dualboot_backend else b"fedora only"),
+                (b"archarm snapshot_current_linux" if self.arch_dualboot_backend else b"legacy backend without Arch support"),
                 mode=0o755,
             )
             for name in ("tab-companion-boot-status", "tab-companion-boot-switch"):
@@ -241,7 +241,7 @@ class VerifyRootfsArchiveIntegrationTests(unittest.TestCase):
         self.assertNotEqual(mismatch.returncode, 0)
         self.assertIn("does not match update.zip", mismatch.stderr)
 
-    def test_rejects_fedora_only_dualboot_backend(self):
+    def test_rejects_dualboot_backend_without_arch_support(self):
         result = self.run_verifier(ArchiveFixture(arch_dualboot_backend=False))
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Arch-aware dualboot backend", result.stderr)

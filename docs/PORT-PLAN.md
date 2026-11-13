@@ -7,18 +7,18 @@ does not install a generic kernel. The installer formats only the existing
 
 ## Build
 
-`rootfs/build-rootfs.sh` is the local Fedora-style entry point. The GitHub
-workflow uses Fedora's job graph: `publication_identity`,
+`rootfs/build-rootfs.sh` is the single local build entry point. The GitHub
+workflow uses the shared multi-stage graph: `publication_identity`,
 `build_port_update`, `plan`, kernel component preparation, `resolve_rootfs`,
 `build_rootfs`, `publish_full_set`, then `prune_old_releases`. The updater job
 runs the contract tests, builds Arch packages, and hands off `update.zip`.
 Independently, the rootfs job builds its own package copies and consumes the
 separately verified X810 kernel-module artifact; it does not wait for the
-updater job. Arch uses the existing Fedora kernel release rather than building
+updater job. Arch uses the existing X810 kernel release rather than building
 a kernel. Because Arch repositories roll, every rootfs is freshly built rather
 than reused from a source-only fingerprint.
 
-GitHub Actions uses separate restore/save caches like the Fedora workflow:
+GitHub Actions uses separate restore/save caches:
 the signed bootstrap is keyed by `ALARM-ROOTFS.lock`, builder package archives
 and makepkg sources are cached per independent build job, and verified pacman
 package archives are cached for rolling-rootfs transactions. The rolling

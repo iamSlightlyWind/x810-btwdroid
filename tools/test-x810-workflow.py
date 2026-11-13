@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/x810-arch.yml"
+FEDORA_WORKFLOW = ROOT.parent / "x810-fedroid/.github/workflows/x810-fedora.yml"
 
 
 class ArchWorkflowTests(unittest.TestCase):
@@ -47,6 +48,73 @@ class ArchWorkflowTests(unittest.TestCase):
         )
         self.assertIn("build_port_update:\n    needs: publication_identity", self.text)
         self.assertNotIn("pull_request:", self.text)
+
+    def test_publication_identity_is_the_same_fedora_gate_except_repo_paths(self):
+        fedora = FEDORA_WORKFLOW.read_text(encoding="utf-8") if FEDORA_WORKFLOW.is_file() else None
+
+        def job_block(text: str, name: str) -> str:
+            start = text.index(f"  {name}:\n")
+            following = re.search(r"\n  [a-z][a-z0-9_]*:\n", text[start + 1:])
+            end = start + 1 + following.start() if following else len(text)
+            block = text[start:end]
+            trailing_comment = block.find("\n  #")
+            return block[:trailing_comment] if trailing_comment >= 0 else block
+
+        arch_identity = job_block(self.text, "publication_identity")
+        arch_identity = arch_identity.replace("x810-arch.yml", "WORKFLOW.yml")
+        # These are deliberately the only workflow-specific release-input paths.
+        arch_identity = arch_identity.replace(
+            "PORT_VERSION README.md LICENSE rootfs docs packages tools .gitignore .github/workflows/WORKFLOW.yml",
+            "PORT_VERSION kernel boot rootfs specs tools .github/workflows/WORKFLOW.yml",
+        )
+        if fedora is not None:
+            fedora_identity = job_block(fedora, "publication_identity").replace(
+                "x810-fedora.yml", "WORKFLOW.yml"
+            )
+            self.assertEqual(arch_identity, fedora_identity)
+        else:
+            # Keep the contract test runnable in GitHub Actions, which checks
+            # out this repository only and does not have the sibling Fedora repo.
+            self.assertIn('github.ref == \'refs/heads/main\'', arch_identity)
+            self.assertIn('event=push&status=completed&per_page=100', arch_identity)
+            self.assertIn('select(.conclusion == "success" and .head_branch == "main")', arch_identity)
+            self.assertIn('git diff --quiet "$commit" "$GITHUB_SHA" --', arch_identity)
+            self.assertIn('No successful main-branch push build is available for this manual run.', arch_identity)
+            self.assertIn('Release inputs changed since the last successful push.', arch_identity)
+
+    def test_all_checkouts_disable_persisted_git_credentials_in_both_workflows(self):
+        workflows = [self.text]
+        if FEDORA_WORKFLOW.is_file():
+            workflows.append(FEDORA_WORKFLOW.read_text(encoding="utf-8"))
+        for workflow in workflows:
+            step_headers = list(re.finditer(r"^\s*- name: .+$", workflow, re.MULTILINE))
+            checked_out = 0
+            for index, header in enumerate(step_headers):
+                end = step_headers[index + 1].start() if index + 1 < len(step_headers) else len(workflow)
+                step = workflow[header.start():end]
+                if "uses: actions/checkout@" in step:
+                    checked_out += 1
+                    self.assertIn("persist-credentials: false", step)
+            self.assertGreater(checked_out, 0)
+
+    def test_release_pruning_permissions_and_success_gate_match_fedora(self):
+        workflows = [self.text]
+        fedora = FEDORA_WORKFLOW.read_text(encoding="utf-8") if FEDORA_WORKFLOW.is_file() else None
+        if fedora is not None:
+            workflows.append(fedora)
+        for workflow in workflows:
+            prune = workflow.split("  prune_old_releases:\n", 1)[1]
+            self.assertIn("    permissions:\n      contents: write", prune)
+            self.assertIn("PUBLISH_RESULT", prune)
+            self.assertIn("REFUSING to prune", prune)
+            self.assertIn("preserving the previous complete release set", prune)
+        arch_publish = self.text.split("  publish_full_set:\n", 1)[1].split("  prune_old_releases:\n", 1)[0]
+        publishes = [arch_publish]
+        if fedora is not None:
+            publishes.append(fedora.split("  publish_full_set:\n", 1)[1].split("  prune_old_releases:\n", 1)[0])
+        for publish in publishes:
+            self.assertIn("    permissions:\n      actions: read\n      contents: write", publish)
+            self.assertIn("needs.build_port_update.result == 'success'", publish)
 
     def test_port_update_job_builds_packages_and_hands_off_only_updater_bundle(self):
         update = self.text.split("  build_port_update:\n", 1)[1].split("  plan:\n", 1)[0]
@@ -105,6 +173,25 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertLess(build.index("Finalize Arch rootfs caches after build attempt"), build.index("Hand the rootfs release set"))
         rootfs_builder = (ROOT / "rootfs/build-rootfs.sh").read_text(encoding="utf-8")
         self.assertIn('"$tools/build-packages.sh"', rootfs_builder)
+
+    def test_aggregate_publication_and_prune_follow_fedora_success_gating(self):
+        fedora = FEDORA_WORKFLOW.read_text(encoding="utf-8") if FEDORA_WORKFLOW.is_file() else None
+        publish = self.text.split("  publish_full_set:\n", 1)[1].split("  prune_old_releases:\n", 1)[0]
+        prune = self.text.split("  prune_old_releases:\n", 1)[1]
+        publishes = [publish]
+        prunes = [prune]
+        if fedora is not None:
+            publishes.append(fedora.split("  publish_full_set:\n", 1)[1].split("  prune_old_releases:\n", 1)[0])
+            prunes.append(fedora.split("  prune_old_releases:\n", 1)[1])
+        for workflow in publishes:
+            self.assertIn("needs.plan.result == 'success'", workflow)
+            self.assertIn("needs.build_port_update.result == 'success'", workflow)
+        for workflow in prunes:
+            self.assertIn("PUBLISH_RESULT", workflow)
+            self.assertIn("repos/$GITHUB_REPOSITORY/releases/latest", workflow)
+            self.assertIn("preserving the previous complete release set", workflow)
+            self.assertIn("REFUSING to prune", workflow)
+            self.assertIn("gh release delete", workflow)
 
     def test_rootfs_build_uses_its_own_packages_and_the_verified_kernel_artifact(self):
         resolve = self.text.split("  resolve_rootfs:\n", 1)[1].split("  build_rootfs:\n", 1)[0]

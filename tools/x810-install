@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Guarded host-side Arch rootfs installer for the Samsung SM-X810.
 
-This intentionally mirrors Fedora's guided install safety model while keeping
-the Arch trial narrower: TWRP must already be open, and the sole block-device
-write is formatting the existing PARTLABEL=linuxroot as ext4. Before formatting,
-it saves the Android boot set to the host and seeds it into the new rootfs. It
-never writes GPT, Android userdata, boot images, recovery, vbmeta, or reboots.
+It uses the shared guided preflight and confirmation flow while keeping the
+Arch install narrower: it accepts rooted/unlocked Android or an
+already-open TWRP session, and the sole block-device write is formatting the
+existing PARTLABEL=linuxroot as ext4. Before formatting, it saves the Android
+boot set to the host and seeds it into the new rootfs. It never writes GPT,
+Android userdata, boot images, recovery, vbmeta, or reboots.
 """
 
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import getpass
 import hashlib
 import json
@@ -33,19 +35,20 @@ from typing import Any, Callable
 
 
 from x810_installer_common import (
-    ADBClient as CommonADBClient, Check, adb_target, command, hash_password,
-    output, parse_sgdisk_info, sha256_file, twrp_identity as common_twrp_identity,
+    ADBClient as CommonADBClient, Check, adb_binary, adb_target, command,
+    hash_password, output, parse_sgdisk_info, sha256_file, stream_adb_file,
+    twrp_identity as common_twrp_identity,
 )
 
 
 EXPECTED_MODEL = "SM-X810"
+EXPECTED_DEVICE = "gts9pwifi"
 EXPECTED_TWRP_ALIAS = "SM-X816B"  # observed generic recovery property on this X810
 EXPECTED_CODENAMES = {"gts9p", "gts9pwifi"}
 EXPECTED_BOOTLOADER_PREFIX = "X810"
 EXPECTED_KERNEL_RELEASE = "7.2.0-gts9wifi"
 REPOSITORY = "iamSlightlyWind/x810-btwdroid"
 RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
-RELEASE_CACHE = Path.home() / ".cache" / "x810-btwdroid" / "releases"
 RELEASE_TYPE = "x810-arch-release"
 INSTALLER_USER_AGENT = "x810-install/1"
 ALARM_SEED_USERNAME = "alarm"
@@ -82,7 +85,7 @@ class InstallBundle:
     version: str
 
 
-def latest_release(opener=urllib.request.urlopen) -> dict[str, Any]:
+def latest_release(opener=urllib.request.urlopen) -> dict[str, Any] | None:
     request = urllib.request.Request(RELEASE_API, headers={
         "Accept": "application/vnd.github+json",
         "User-Agent": INSTALLER_USER_AGENT,
@@ -91,6 +94,8 @@ def latest_release(opener=urllib.request.urlopen) -> dict[str, Any]:
         with opener(request, timeout=30) as response:
             payload = response.read(4 * 1024 * 1024 + 1)
     except urllib.error.HTTPError as error:
+        if error.code == 404:
+            return None
         raise ValueError(f"GitHub release lookup failed with HTTP {error.code}") from error
     except (OSError, urllib.error.URLError, TimeoutError) as error:
         raise ValueError(f"could not query the latest Arch release: {error}") from error
@@ -134,6 +139,7 @@ def _release_manifest(release: dict[str, Any], opener=urllib.request.urlopen) ->
             or not isinstance(size, int) or isinstance(size, bool) or not 0 < size <= 16 * 1024 * 1024):
         raise ValueError("release manifest download metadata is invalid")
     request = urllib.request.Request(url, headers={"User-Agent": INSTALLER_USER_AGENT})
+    print("Fetching release manifest.json...", flush=True)
     try:
         with opener(request, timeout=90) as response:
             data = response.read(size + 1)
@@ -152,10 +158,11 @@ def _release_manifest(release: dict[str, Any], opener=urllib.request.urlopen) ->
             or manifest.get("schema_version") != 1
             or manifest.get("type") != RELEASE_TYPE
             or manifest.get("release_tag") != tag
-            or manifest.get("device") != {"model": EXPECTED_MODEL, "codename": "gts9pwifi"}
+            or manifest.get("device") != {"model": EXPECTED_MODEL, "codename": EXPECTED_DEVICE}
             or manifest.get("os") != {"id": "archarm", "arch": "aarch64"}
             or manifest.get("kernel_release") != EXPECTED_KERNEL_RELEASE):
         raise ValueError("release manifest is not for this X810 Arch build")
+    print("Release manifest matches this X810; resolving required files and checksums...", flush=True)
     rootfs = manifest.get("rootfs")
     if not isinstance(rootfs, dict) or rootfs.get("archive") != "rootfs.tar.zst":
         raise ValueError("release manifest does not identify rootfs.tar.zst")
@@ -175,39 +182,173 @@ def _release_manifest(release: dict[str, Any], opener=urllib.request.urlopen) ->
     return manifest, assets
 
 
+def _format_bytes(count: int) -> str:
+    value = float(count)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if value < 1024 or unit == "TiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{count} B"
+
+
+def _terminal_download_progress(name: str, downloaded: int, total: int) -> None:
+    """Show readable TTY progress and concise redirected CI log output."""
+    if downloaded == 0:
+        print(f"Downloading {name} ({_format_bytes(total)})...", flush=True)
+        return
+    percent = min(100.0, downloaded * 100.0 / total)
+    line = f"  {name}: {percent:5.1f}%  {_format_bytes(downloaded)} / {_format_bytes(total)}"
+    if sys.stdout.isatty():
+        print("\r" + line, end="", flush=True)
+    else:
+        print(line, flush=True)
+    if downloaded == total and sys.stdout.isatty():
+        print()
+
+
+def _cached_asset_matches(path: Path, size: int, digest: str) -> bool:
+    try:
+        return (not path.parent.is_symlink() and not path.is_symlink() and path.is_file()
+                and path.stat().st_size == size and sha256_file(path) == digest)
+    except OSError:
+        return False
+
+
+def _find_previous_release_asset(destination: Path, size: int, digest: str) -> Path | None:
+    root = default_release_cache_root()
+    if root.is_symlink() or not root.is_dir():
+        return None
+    for release_dir in root.iterdir():
+        if release_dir == destination.parent or release_dir.is_symlink() or not release_dir.is_dir():
+            continue
+        candidate = release_dir / destination.name
+        if _cached_asset_matches(candidate, size, digest):
+            return candidate
+    return None
+
+
 def _download_release_asset(asset: dict[str, Any], digest: str, size: int,
-                            destination: Path, opener=urllib.request.urlopen) -> Path:
+                            destination: Path, opener=urllib.request.urlopen,
+                            progress: Callable[[str, int, int], None] | None = None,
+                            reuse_from: Path | None = None) -> Path:
     if destination.is_symlink():
         raise ValueError(f"refusing symlinked release cache file: {destination}")
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     destination.parent.chmod(0o700)
-    if destination.is_file() and destination.stat().st_size == size and sha256_file(destination) == digest:
+    if _cached_asset_matches(destination, size, digest):
+        print(f"Using verified cached {destination.name} ({_format_bytes(size)}).", flush=True)
+        if progress:
+            progress(destination.name, size, size)
+            print(f"  Verified {destination.name} (size and SHA-256).", flush=True)
         return destination
-    temp = destination.with_name(f".{destination.name}.partial-{os.getpid()}")
-    if temp.exists() or temp.is_symlink():
-        temp.unlink()
-    request = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": INSTALLER_USER_AGENT})
+
+    partial = destination.with_name(destination.name + ".part")
+    if destination.exists():
+        if not destination.is_file():
+            raise ValueError(f"cached asset path is not a regular file: {destination}")
+        current_size = destination.stat().st_size
+        if 0 < current_size < size:
+            if partial.is_symlink():
+                partial.unlink()
+            if not partial.exists() or partial.stat().st_size < current_size:
+                os.replace(destination, partial)
+            else:
+                destination.unlink()
+            print(f"Preserving incomplete {destination.name} ({_format_bytes(current_size)}); will resume by SHA-256-verified range.", flush=True)
+        else:
+            print(f"Discarding invalid cached {destination.name}; downloading a verified copy.", flush=True)
+            destination.unlink()
+    if reuse_from is None:
+        reuse_from = _find_previous_release_asset(destination, size, digest)
+    if reuse_from is not None:
+        if not _cached_asset_matches(reuse_from, size, digest):
+            raise ValueError(f"previous-release cache failed revalidation for {destination.name}")
+        try:
+            os.link(reuse_from, destination)
+        except OSError:
+            shutil.copyfile(reuse_from, destination)
+        if not _cached_asset_matches(destination, size, digest):
+            destination.unlink(missing_ok=True)
+            raise ValueError(f"reused cache failed size/SHA-256 verification for {destination.name}")
+        print(f"Reusing verified cached {destination.name} from an earlier release ({_format_bytes(size)}).", flush=True)
+        if progress:
+            progress(destination.name, size, size)
+            print(f"  Verified {destination.name} (size and SHA-256).", flush=True)
+        return destination
+
+    if partial.is_symlink():
+        partial.unlink()
+    if partial.exists() and (not partial.is_file() or partial.stat().st_size >= size):
+        if not partial.is_file():
+            raise ValueError(f"cached partial asset path is not a regular file: {partial}")
+        partial.unlink()
+    offset = partial.stat().st_size if partial.exists() else 0
+    headers = {"User-Agent": INSTALLER_USER_AGENT}
+    if offset:
+        headers["Range"] = f"bytes={offset}-"
+    request = urllib.request.Request(asset["browser_download_url"], headers=headers)
     hasher = hashlib.sha256()
-    count = 0
-    print(f"Downloading {destination.name} ({size:,} bytes)...", flush=True)
+    count = offset
+    last_progress = offset
+    last_progress_time = time.monotonic()
+    if progress:
+        progress(destination.name, offset, size)
     try:
-        with opener(request, timeout=120) as response, temp.open("xb") as output_file:
+        response = opener(request, timeout=60)
+        append = False
+        if offset:
+            status = getattr(response, "status", None)
+            response_headers = getattr(response, "headers", {})
+            content_range = response_headers.get("Content-Range", "") if hasattr(response_headers, "get") else ""
+            match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range.strip())
+            if status == 206 and match and int(match.group(1)) == offset and int(match.group(3)) == size:
+                append = True
+                with partial.open("rb") as prefix:
+                    for block in iter(lambda: prefix.read(1024 * 1024), b""):
+                        hasher.update(block)
+            elif status == 200 or status is None:
+                count = 0
+            else:
+                response.close()
+                partial.unlink(missing_ok=True)
+                offset = count = 0
+                request = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": INSTALLER_USER_AGENT})
+                response = opener(request, timeout=60)
+        if offset and not append and count == 0:
+            partial.unlink(missing_ok=True)
+        mode = "ab" if append else "wb"
+        flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if append else os.O_TRUNC)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(partial, flags, 0o600)
+        with response, os.fdopen(descriptor, mode) as output_file:
             while True:
                 block = response.read(4 * 1024 * 1024)
                 if not block:
                     break
                 count += len(block)
                 if count > size:
+                    partial.unlink(missing_ok=True)
                     raise ValueError(f"downloaded {destination.name} exceeds manifest size")
                 hasher.update(block)
                 output_file.write(block)
-        if count != size or hasher.hexdigest() != digest:
-            raise ValueError(f"downloaded {destination.name} failed size/SHA-256 verification")
-        os.chmod(temp, 0o600)
-        os.replace(temp, destination)
-    finally:
-        if temp.exists():
-            temp.unlink()
+                now = time.monotonic()
+                if progress and (count - last_progress >= 64 * 1024**2 or now - last_progress_time >= 3):
+                    progress(destination.name, count, size)
+                    last_progress, last_progress_time = count, now
+            output_file.flush()
+            os.fsync(output_file.fileno())
+    except (OSError, urllib.error.URLError, TimeoutError) as error:
+        raise ValueError(f"could not download release asset {destination.name}: {error}; partial data is retained for retry") from error
+    if count != size or hasher.hexdigest() != digest:
+        if count == size:
+            partial.unlink(missing_ok=True)
+        raise ValueError(f"downloaded {destination.name} failed size/SHA-256 verification")
+    os.replace(partial, destination)
+    if progress:
+        if count != last_progress:
+            progress(destination.name, count, size)
+        print(f"  Verified {destination.name} (size and SHA-256).", flush=True)
     return destination
 
 
@@ -226,34 +367,70 @@ def _verify_archive(project: Path, archive: Path, digest: str, size: int, versio
     return InstallBundle(archive=archive, sha256=digest, size_bytes=size, version=version)
 
 
+def default_release_cache_root() -> Path:
+    return Path(os.environ.get("XDG_CACHE_HOME", "~/.cache")).expanduser() / "x810-btwdroid" / "releases"
+
+
+@contextmanager
+def open_install_bundle(project: Path, bundle_path: InstallBundle | None,
+                        opener=urllib.request.urlopen,
+                        runner: Callable[..., subprocess.CompletedProcess[str]] = command):
+    """Resolve a verified local bundle or acquire the current release."""
+    if isinstance(bundle_path, InstallBundle):
+        print(f"Verified X810 install set {bundle_path.version} for {EXPECTED_MODEL}.")
+        yield bundle_path
+        return
+    print("\nChecking GitHub for the latest X810 install release...", flush=True)
+    release = latest_release(opener)
+    if release is None:
+        raise ValueError("no public GitHub release is available; publish the aggregate Arch release before installing")
+    tag = release.get("tag_name")
+    if not isinstance(tag, str) or not tag:
+        raise ValueError("GitHub latest release has no valid tag name")
+    cache_path = default_release_cache_root() / hashlib.sha256(tag.encode("utf-8")).hexdigest()[:24]
+    print(f"Found {tag}; verified downloads are cached at {cache_path}.", flush=True)
+    bundle = download_release_install_set(project, release, opener, runner, cache_path)
+    yield bundle
+
+
 def download_release_install_set(project: Path, release: dict[str, Any], opener=urllib.request.urlopen,
-                                 runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
+                                 runner: Callable[..., subprocess.CompletedProcess[str]] = command,
+                                 cache_path: Path | None = None) -> InstallBundle:
     manifest, assets = _release_manifest(release, opener)
     tag = manifest["release_tag"]
     key = hashlib.sha256(tag.encode("utf-8")).hexdigest()[:24]
-    cache = RELEASE_CACHE / key
+    cache = cache_path or (default_release_cache_root() / key)
     if cache.is_symlink():
         raise ValueError(f"release cache path must not be a symlink: {cache}")
     cache.mkdir(mode=0o700, parents=True, exist_ok=True)
     cache.chmod(0o700)
     (cache / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     rootfs = manifest["rootfs"]
+    archive_path = cache / "rootfs.tar.zst"
+    reusable = None if _cached_asset_matches(archive_path, rootfs["size_bytes"], rootfs["sha256"]) else \
+        _find_previous_release_asset(archive_path, rootfs["size_bytes"], rootfs["sha256"])
+    missing_bytes = 0 if _cached_asset_matches(archive_path, rootfs["size_bytes"], rootfs["sha256"]) or reusable else rootfs["size_bytes"]
+    if shutil.disk_usage(cache).free < missing_bytes + 128 * 1024**2:
+        raise ValueError(f"not enough free disk space for missing install files ({missing_bytes:,} bytes plus temporary headroom required)")
+    print(f"Checking 1 required file ({_format_bytes(missing_bytes)} to download); progress is shown per file.", flush=True)
     archive = _download_release_asset(
         assets["rootfs.tar.zst"], rootfs["sha256"], rootfs["size_bytes"],
-        cache / "rootfs.tar.zst", opener,
+        archive_path, opener, progress=_terminal_download_progress, reuse_from=reusable,
     )
     (cache / "release.json").write_text(json.dumps({
         "tag_name": tag, "published_at": release.get("published_at", ""),
     }, indent=2) + "\n", encoding="utf-8")
-    return _verify_archive(project, archive, rootfs["sha256"], rootfs["size_bytes"], tag, runner)
+    verified = _verify_archive(project, archive, rootfs["sha256"], rootfs["size_bytes"], tag, runner)
+    return verified
 
 
 def find_cached_install_bundle(project: Path,
                                runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
-    if RELEASE_CACHE.is_symlink() or not RELEASE_CACHE.is_dir():
+    cache_root = default_release_cache_root()
+    if cache_root.is_symlink() or not cache_root.is_dir():
         raise ValueError("no cached X810 Arch release is available")
     candidates: list[tuple[str, Path, dict[str, Any], dict[str, Any]]] = []
-    for cache in RELEASE_CACHE.iterdir():
+    for cache in cache_root.iterdir():
         if cache.is_symlink() or not cache.is_dir():
             continue
         try:
@@ -281,7 +458,7 @@ def _validate_cached_manifest(manifest: dict[str, Any], tag: Any) -> None:
     if (isinstance(manifest.get("schema_version"), bool) or manifest.get("schema_version") != 1
             or manifest.get("type") != RELEASE_TYPE
             or manifest.get("release_tag") != tag
-            or manifest.get("device") != {"model": EXPECTED_MODEL, "codename": "gts9pwifi"}
+            or manifest.get("device") != {"model": EXPECTED_MODEL, "codename": EXPECTED_DEVICE}
             or manifest.get("os") != {"id": "archarm", "arch": "aarch64"}
             or manifest.get("kernel_release") != EXPECTED_KERNEL_RELEASE
             or not isinstance(manifest.get("rootfs"), dict)):
@@ -334,6 +511,51 @@ def twrp_identity(client: ADBClient) -> tuple[dict[str, str], list[Check]]:
         codenames=EXPECTED_CODENAMES, bootloader_prefix=EXPECTED_BOOTLOADER_PREFIX,
         model_aliases={EXPECTED_TWRP_ALIAS}, require_bootloader=True,
     )
+
+
+def _getprop(client: ADBClient, key: str) -> str:
+    result = client.shell("getprop", key)
+    return result.stdout.strip().replace("\r", "") if result.returncode == 0 else ""
+
+
+def android_preflight(adb: str, serial: str | None, runner=command) -> tuple[str, list[Check]]:
+    """Require a positively identified, unlocked, rooted Android system."""
+    target, state = adb_target(adb, serial, runner, {"device"})
+    client = ADBClient(adb, target, runner=runner)
+    values = {key: _getprop(client, key) for key in (
+        "ro.boot.em.model", "ro.product.model", "ro.product.device",
+        "ro.boot.flash.locked", "ro.boot.vbmeta.device_state", "ro.boot.verifiedbootstate",
+        "ro.bootloader",
+    )}
+    checks = [Check("ADB target", "OK", f"{target} (Android)")]
+    identified = (
+        values["ro.boot.em.model"] == EXPECTED_MODEL
+        or (values["ro.product.model"] == EXPECTED_MODEL and values["ro.product.device"] == EXPECTED_DEVICE)
+        or (values["ro.bootloader"].startswith("X810") and values["ro.product.device"] == EXPECTED_DEVICE)
+    )
+    checks.append(Check("Tablet identity", "OK" if identified else "STOP",
+                        f"{values['ro.boot.em.model'] or values['ro.product.model'] or '?'} / {values['ro.product.device'] or '?'}"))
+    unlock_evidence = []
+    if values["ro.boot.flash.locked"] == "0":
+        unlock_evidence.append("ro.boot.flash.locked=0")
+    if values["ro.boot.vbmeta.device_state"].lower() == "unlocked":
+        unlock_evidence.append("vbmeta device_state=unlocked")
+    if values["ro.boot.verifiedbootstate"].lower() == "orange":
+        unlock_evidence.append("verifiedbootstate=orange")
+    locked = values["ro.boot.flash.locked"] == "1" or values["ro.boot.vbmeta.device_state"].lower() == "locked"
+    if unlock_evidence and not locked:
+        checks.append(Check("Bootloader", "OK", ", ".join(unlock_evidence)))
+    elif locked:
+        checks.append(Check("Bootloader", "STOP", "Android reports a locked bootloader; unlock it manually before installation"))
+    else:
+        checks.append(Check("Bootloader", "STOP", "could not positively prove unlocked state from Android boot properties"))
+    root = client.shell("su", "-c", "id -u", timeout=20)
+    is_root = root.returncode == 0 and root.stdout.strip() == "0"
+    checks.append(Check("Android root", "OK" if is_root else "STOP",
+                        "`su -c id -u` returned 0" if is_root else "root via su is unavailable/denied; install and verify root manually"))
+    if not identified:
+        checks.append(Check("Safety", "STOP", "installer only supports positively identified SM-X810/gts9pwifi"))
+    return target, checks
 
 
 def _shell_text(result: subprocess.CompletedProcess[str], label: str) -> str:
@@ -411,38 +633,83 @@ def revalidate_partition_before_format(client: ADBClient, expected: dict[str, An
 
 
 def preflight_twrp_tools(client: ADBClient) -> list[Check]:
-    required = ("sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot", "dd")
-    checks = []
+    required = ("sgdisk", "blockdev", "dd", "mke2fs", "e2fsck", "mount", "umount",
+                "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv",
+                "cp", "mkdir", "rm", "chroot", "sh", "test")
+    missing = []
     for tool in required:
-        # Quote the complete command string: adb shell concatenates arguments
-        # remotely, so an unquoted `sh -c command -v tool` would check only
-        # `command` and falsely report missing tools as present.
-        command_text = shlex.quote(f"command -v {shlex.quote(tool)}")
-        result = client.shell("sh", "-c", command_text)
-        if result.returncode == 0:
-            checks.append(Check(f"TWRP tool: {tool}", "OK", result.stdout.strip() or "available"))
+        result = client.shell("command", "-v", tool)
+        if result.returncode != 0 or not result.stdout.strip():
+            missing.append(tool)
+    direct_blkid = client.shell("command", "-v", "blkid")
+    if direct_blkid.returncode != 0 or not direct_blkid.stdout.strip():
+        help_result = client.shell("toybox", "blkid", "--help")
+        if "usage: blkid" not in help_result.stdout.lower():
+            missing.append("blkid (or toybox blkid)")
+    return [Check("TWRP utilities", "STOP" if missing else "OK",
+                  "missing required command(s): " + ", ".join(missing) if missing else "all required recovery commands are available")]
+
+
+def linux_ids(path: Path = Path("/etc/os-release")) -> set[str]:
+    """Read distro IDs without sourcing shell code from os-release."""
+    values: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return values
+    for line in lines:
+        key, separator, value = line.partition("=")
+        if not separator or key not in {"ID", "ID_LIKE"}:
+            continue
+        try:
+            words = shlex.split(value, comments=False, posix=True)
+        except ValueError:
+            continue
+        if key == "ID_LIKE":
+            values.update(word.lower() for part in words for word in part.split())
         else:
-            checks.append(Check(f"TWRP tool: {tool}", "STOP", "required for safe rootfs-only install"))
-    blkid = client.shell("toybox", "blkid", "-s", "LABEL", LINUXROOT)
-    if blkid.returncode == 0:
-        checks.append(Check("TWRP tool: blkid", "OK", "Toybox blkid applet"))
-    else:
-        checks.append(Check("TWRP tool: blkid", "STOP", "Toybox blkid applet is required to inspect linuxroot"))
-    return checks
+            values.update(word.lower() for word in words)
+    return values
+
+
+def package_hint(program: str, ids: set[str] | None = None) -> str:
+    """Give non-installing package-manager guidance for common Linux hosts."""
+    ids = linux_ids() if ids is None else ids
+    managers = (
+        ({"fedora", "rhel", "centos", "rocky", "almalinux"}, "dnf"),
+        ({"debian", "ubuntu", "linuxmint", "pop", "elementary"}, "apt"),
+        ({"arch", "manjaro", "endeavouros", "archarm"}, "pacman"),
+        ({"opensuse", "opensuse-tumbleweed", "suse", "sles"}, "zypper"),
+    )
+    packages = {"adb": {"dnf": "android-tools", "apt": "adb", "pacman": "android-tools", "zypper": "android-tools"},
+                "sha256sum": {"dnf": "coreutils", "apt": "coreutils", "pacman": "coreutils", "zypper": "coreutils"},
+                "openssl": {"dnf": "openssl", "apt": "openssl", "pacman": "openssl", "zypper": "openssl"},
+                "zstd": {"dnf": "zstd", "apt": "zstd", "pacman": "zstd", "zypper": "zstd"}}
+    names = packages.get(program, {})
+    suggestions = []
+    for families, manager in managers:
+        if ids & families and manager in names:
+            suggestions.append(f"sudo {manager} install {names[manager]}" if manager != "pacman" else f"sudo pacman -S {names[manager]}")
+    return "; ".join(suggestions) or f"install {program} with your Linux package manager"
 
 
 def host_checks(adb: str | None = None) -> list[Check]:
-    checks = [Check("Host OS", "OK" if platform.system() == "Linux" else "STOP", platform.system())]
-    for program in ("adb", "zstd", "openssl"):
+    checks = [Check("Host OS", "OK" if platform.system() == "Linux" else "STOP", platform.platform())]
+    programs = (
+        ("adb", True), ("sha256sum", True), ("openssl", True), ("zstd", True),
+        ("heimdall", False), ("odin4", False),
+    )
+    for program, required in programs:
         path = adb if program == "adb" and adb else shutil.which(program)
-        checks.append(Check(f"Host tool: {program}", "OK" if path else "STOP", path or "not found"))
+        detail = path or (f"not installed ({package_hint(program)})" if required else "optional; one Download Mode flashing tool is needed later")
+        checks.append(Check(program, "OK" if path else ("STOP" if required else "INFO"), detail))
     return checks
 
 
 def show_checks(checks: list[Check]) -> None:
-    width = max((len(item.label) for item in checks), default=0)
-    for item in checks:
-        print(f"[{item.state:5}] {item.label:<{width}}  {item.detail}")
+    width = max((len(check.label) for check in checks), default=0)
+    for check in checks:
+        print(f"[{check.state:7}] {check.label:<{width}}  {check.detail}")
 
 
 def write_gpt_backup(client: ADBClient, project: Path, identity: dict[str, str],
@@ -690,10 +957,8 @@ def save_android_boot_set(client: ADBClient, backup: Path,
     return images
 
 
-def prompt_install_details(password_reader: Callable[[str], str] = getpass.getpass,
-                           input_func: Callable[[str], str] = input) -> dict[str, str]:
-    """Collect a fresh-install identity and password, matching the Fedora flow."""
-    def prompt_nonempty(label: str, validation: Callable[[str], None]) -> str:
+def prompt_install_details(password_reader=getpass.getpass, input_func=input) -> dict[str, str]:
+    def prompt_nonempty(label: str, validation) -> str:
         while True:
             answer = input_func(label).strip()
             try:
@@ -711,25 +976,28 @@ def prompt_install_details(password_reader: Callable[[str], str] = getpass.getpa
             raise ValueError("hostname must be a single DNS label of at most 63 letters, digits, or hyphens")
 
     def valid_full_name(value: str) -> None:
-        if (not value or len(value) > 128 or ":" in value or
-                any(unicodedata.category(ch).startswith("C") for ch in value)):
+        if not value or len(value) > 128 or ":" in value or any(unicodedata.category(ch).startswith("C") for ch in value):
             raise ValueError("enter a non-empty name (up to 128 characters) without control characters")
 
     details: dict[str, str] = {}
     details["full_name"] = prompt_nonempty("Full name: ", valid_full_name)
     details["username"] = prompt_nonempty("Linux username: ", valid_username)
     details["hostname"] = prompt_nonempty("Hostname: ", valid_hostname)
-    for _ in range(3):
-        first = password_reader("New Arch user password (hidden): ")
-        second = password_reader("Repeat password: ")
-        if not first or "\n" in first or "\r" in first or "\x00" in first:
-            print("Password may not be empty or contain newline or NUL characters.")
-        elif first != second:
+    while True:
+        password = password_reader("New Arch user password (hidden): ")
+        repeated = password_reader("Repeat password: ")
+        if not password:
+            print("Password may not be empty.")
+        elif "\n" in password or "\r" in password or "\x00" in password:
+            print("Password may not contain newline or NUL characters.")
+        elif password != repeated:
             print("Passwords do not match.")
         else:
-            details["password_hash"] = hash_password(first)
-            return details
-    raise ValueError("password confirmation failed")
+            details["password_hash"] = hash_password(password)
+            password = ""
+            repeated = ""
+            break
+    return details
 
 
 def provision_rootfs_account(client: ADBClient, mountpoint: str, username: str,
@@ -1042,13 +1310,22 @@ def run_doctor(serial: str | None = None,
     if any(item.state == "STOP" for item in checks):
         return 2
     try:
-        target, _ = adb_target(adb or "adb", serial, runner)
+        target, state = adb_target(adb or "adb", serial, runner, {"device", "recovery"})
+        if state == "device":
+            target, device_checks = android_preflight(adb or "adb", target, runner)
+            show_checks(device_checks)
+            if any(item.state == "STOP" for item in device_checks):
+                return 2
+            print("Android is unlocked/rooted. Manually enter TWRP to check recovery readiness; the doctor will not reboot the tablet.")
+            return 0
         client = ADBClient(adb or "adb", target, runner)
         _, identity_checks = twrp_identity(client)
         show_checks(identity_checks)
+        if any(item.state == "STOP" for item in identity_checks):
+            return 2
         tools = preflight_twrp_tools(client)
         show_checks(tools)
-        if any(item.state == "STOP" for item in identity_checks + tools):
+        if any(item.state == "STOP" for item in tools):
             return 2
         facts, partition_checks = validate_partition(client, 0)
         show_checks(partition_checks)
@@ -1058,7 +1335,7 @@ def run_doctor(serial: str | None = None,
         return 2
 
 
-def run_install(project: Path, bundle: InstallBundle, serial: str | None = None,
+def run_install(project: Path, bundle: InstallBundle | None, serial: str | None = None,
                 plan_only: bool = False,
                 runner: Callable[..., subprocess.CompletedProcess[str]] = command,
                 password_reader: Callable[[str], str] = getpass.getpass,
@@ -1067,64 +1344,120 @@ def run_install(project: Path, bundle: InstallBundle, serial: str | None = None,
         print("STOP: this installer requires a Linux host.")
         return 2
     adb = shutil.which("adb")
-    checks = host_checks(adb)
-    show_checks(checks)
-    if any(item.state == "STOP" for item in checks):
+    if not adb:
+        print(f"STOP: adb is required ({package_hint('adb')}).")
         return 2
+    for program in ("zstd", "openssl"):
+        if not shutil.which(program):
+            print(f"STOP: {program} is required ({package_hint(program)}).")
+            return 2
     try:
-        target, _ = adb_target(adb or "adb", serial, runner)
-        client = ADBClient(adb or "adb", target, runner)
-        values, identity_checks = twrp_identity(client)
-        show_checks(identity_checks)
-        if any(item.state == "STOP" for item in identity_checks):
-            print("STOP: TWRP identity/root checks failed; no tablet writes were made.")
-            return 2
-        tool_checks = preflight_twrp_tools(client)
-        show_checks(tool_checks)
-        if any(item.state == "STOP" for item in tool_checks):
-            print("STOP: TWRP is missing a required utility; no tablet writes were made.")
-            return 2
-        partition, partition_checks = validate_partition(client, bundle.size_bytes)
-        show_checks(partition_checks)
-        print_plan(bundle, partition)
-        if plan_only:
-            print("PLAN ONLY: no GPT backup or tablet writes performed.")
+        preflight_target: str | None = None
+        started_in_twrp = False
+        preflight_target, initial_state = adb_target(adb, serial, runner, {"device", "recovery"})
+        if initial_state == "device":
+            preflight_target, android_checks = android_preflight(adb, preflight_target, runner=runner)
+            show_checks(android_checks)
+            if any(check.state == "STOP" for check in android_checks):
+                print("STOP: resolve Android model/unlock/root checks manually; installer made no tablet changes.")
+                return 2
+        else:
+            # Fail before downloading the multi-gigabyte archive if the open
+            # recovery is not positively identified as this unlocked X810.
+            started_in_twrp = True
+            preflight_client = ADBClient(adb, preflight_target, runner)
+            _values, recovery_checks = twrp_identity(preflight_client)
+            show_checks(recovery_checks)
+            if any(check.state == "STOP" for check in recovery_checks):
+                print("STOP: connected recovery was not positively identified as unlocked X810 TWRP; no download or tablet changes were made.")
+                return 2
+
+        with open_install_bundle(project, bundle) as verified_bundle:
+            bundle = verified_bundle
+            if started_in_twrp:
+                target, state = adb_target(adb, preflight_target, runner, {"recovery"})
+                print("TWRP preflight passed. Continuing in the already-open recovery; this script will not reboot the tablet.")
+            else:
+                target, _ = adb_target(adb, preflight_target, runner, {"device"})
+                print("\nAndroid preflight passed. Enter TWRP manually; this script will not reboot the tablet.")
+                input_func("After TWRP is fully loaded with USB debugging/ADB available, press Enter: ")
+                target, state = adb_target(adb, target, runner, {"recovery"})
+                if serial and target != serial:
+                    raise RuntimeError("ADB serial changed unexpectedly")
+
+            client = ADBClient(adb, target, runner)
+            values, identity_checks = twrp_identity(client)
+            show_checks(identity_checks)
+            if any(item.state == "STOP" for item in identity_checks):
+                print("STOP: TWRP identity/root checks failed; no tablet changes were made.")
+                return 2
+            tool_checks = preflight_twrp_tools(client)
+            show_checks(tool_checks)
+            if any(item.state == "STOP" for item in tool_checks):
+                print("STOP: TWRP is missing a required utility; no tablet changes were made.")
+                return 2
+            partition, partition_checks = validate_partition(client, bundle.size_bytes)
+            show_checks(partition_checks)
+            print_plan(bundle, partition)
+            if plan_only:
+                print("PLAN ONLY: no backups or tablet writes performed.")
+                return 0
+
+            try:
+                account_details = prompt_install_details(password_reader, input_func)
+            except (EOFError, KeyboardInterrupt):
+                print("Cancelled before backup/write.")
+                return 1
+
+            try:
+                backup = write_gpt_backup(client, project, values, partition, bundle)
+                gpt_backup_checks = [Check("GPT backup", "OK", f"read-only metadata saved at {backup}")]
+                show_checks(gpt_backup_checks)
+                android_images = save_android_boot_set(client, backup, input_func)
+                boot_backup_checks = [Check("Android boot backup", "OK",
+                                            f"four verified images saved at {backup / 'boot' / 'android'}")]
+                show_checks(boot_backup_checks)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                print(f"STOP: pre-install backups did not complete: {error}; no tablet writes were made.")
+                return 2
+            print(f"Private recovery copies are in {backup} (GPT metadata + four Android boot images; not user data).")
+
+            try:
+                entered = input_func(f"\nType exactly `{INSTALL_CONFIRMATION}` to continue: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("Cancelled; no tablet writes were made.")
+                return 1
+            if entered != INSTALL_CONFIRMATION:
+                print("Confirmation did not match; no tablet writes were made.")
+                return 1
+            try:
+                entered = input_func(f"Type `{FORMAT_CONFIRMATION}` to begin Arch writes: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print(f"Cancelled before formatting; backups are retained at {backup}.")
+                return 1
+            if entered != FORMAT_CONFIRMATION:
+                print(f"Cancelled before formatting; backups are retained at {backup}.")
+                return 1
+
+            try:
+                format_and_install(client, bundle, backup, account_details, partition, android_images)
+            except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+                print(f"STOP: install stage failed: {error}")
+                print(f"Remain in TWRP and preserve the verified Android images in {backup / 'boot' / 'android'}; do not reboot until the failure is reviewed.")
+                return 2
+            print(f"\nArch rootfs extracted, fresh {account_details['username']} account created, and read-only filesystem verification passed.")
+            print(f"Install record / GPT and Android boot backups: {backup}")
+            print("No reboot was performed. Review the backup, then manually choose when to boot the tablet.")
             return 0
-        account_details = prompt_install_details(password_reader, input_func)
-        try:
-            entered = input_func(f"Type exactly `{INSTALL_CONFIRMATION}` to continue: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("Cancelled; no tablet changes were made.")
-            return 1
-        if entered != INSTALL_CONFIRMATION:
-            print("Confirmation did not match; no tablet changes were made.")
-            return 1
-        backup = write_gpt_backup(client, project, values, partition, bundle)
-        print(f"Read-only GPT metadata backup saved to {backup}.")
-        android_images = save_android_boot_set(client, backup, input_func)
-        print(f"Verified Android boot images saved locally under {backup / 'boot' / 'android'}.")
-        try:
-            entered = input_func(f"Type exactly `{FORMAT_CONFIRMATION}` to format linuxroot: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("Cancelled; linuxroot was not formatted. GPT and Android boot backups retained.")
-            return 1
-        if entered != FORMAT_CONFIRMATION:
-            print("Confirmation did not match; linuxroot was not formatted. GPT and Android boot backups retained.")
-            return 1
-        format_and_install(client, bundle, backup, account_details, partition, android_images)
-        print(f"\nArch rootfs extracted, fresh {account_details['username']} account created, and read-only filesystem verification passed.")
-        print(f"Install record / GPT and Android boot backups: {backup}")
-        print("No reboot was performed. Manually choose when to leave TWRP after reviewing the result.")
-        return 0
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as error:
         print(f"INSTALL STOPPED: {error}", file=sys.stderr)
-        print("No automatic reboot was attempted. If formatting/extraction began, remain in TWRP and rerun only after reviewing the failure.", file=sys.stderr)
+        print("No automatic reboot was attempted. If formatting/extraction began, remain in TWRP and retain the local backups.", file=sys.stderr)
         return 2
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Fetch and safely install the latest verified X810 Arch GNOME/GDM release from an already-open TWRP session."
+        description="Fetch and safely install the latest verified X810 Arch GNOME/GDM release; manual TWRP entry is prompted in-flow."
     )
     parser.add_argument("command", nargs="?", choices=("install", "doctor"), default="install",
                         help="install the latest GitHub release (default), or perform read-only host/TWRP checks")
@@ -1138,19 +1471,16 @@ def main() -> int:
         if args.no_update or args.plan_only:
             parser.error("doctor does not accept --no-update or --plan-only")
         return run_doctor(args.serial)
-    if not args.plan_only and not (sys.stdin.isatty() and sys.stdout.isatty()):
-        print("STOP: install requires an interactive terminal for hidden password entry and typed confirmations.", file=sys.stderr)
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("STOP: this command requires an interactive terminal for typed confirmations.", file=sys.stderr)
         return 2
+    bundle: InstallBundle | None = None
     try:
         if args.no_update:
             bundle = find_cached_install_bundle(project)
-            print(f"Verified cached GitHub release {bundle.version}; no network request was made.", flush=True)
-        else:
-            release = latest_release()
-            bundle = download_release_install_set(project, release)
-            print(f"Verified GitHub release {bundle.version}; SHA-256 {bundle.sha256}.", flush=True)
+            print(f"Using verified cached release {bundle.version}; no GitHub request will be made.", flush=True)
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print(f"INSTALL STOPPED: release download/verification failed: {error}", file=sys.stderr)
+        print(f"INSTALL STOPPED: --no-update found no valid cached install set ({error}).", file=sys.stderr)
         return 2
     return run_install(project, bundle, args.serial, args.plan_only)
 

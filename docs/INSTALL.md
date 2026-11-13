@@ -2,7 +2,8 @@
 
 `tools/x810-install` is the Python host installer. It fetches the latest
 verified GitHub rootfs release (or uses the local cache with `--no-update`),
-validates the device in TWRP, saves the Android `boot`, `init_boot`,
+checks rooted/unlocked Android before fetching the release, prompts for manual
+TWRP entry when started from Android (or accepts TWRP already open), saves the Android `boot`, `init_boot`,
 `vendor_boot`, and `dtbo` images to a private host-side backup, formats only
 `linuxroot`, stages and read-back-verifies those images in the new rootfs,
 provisions a fresh account, verifies the extracted tree, and stops without
@@ -27,14 +28,15 @@ python3 tools/test-tab-companion-overlay.py
 
 ## Recovery
 
-With the tablet already in TWRP:
+The tablet may be in Android or already in TWRP:
 
 ```sh
 python3 tools/x810-install doctor
 python3 tools/x810-install install --plan-only
 ```
 
-These do not write tablet partitions. The normal install requires a new
+The installer does not fetch the large rootfs until the initial Android/TWRP
+identity and unlock checks pass. These commands do not write tablet partitions. The normal install requires a new
 account identity/password and exact confirmations. It reads a saved Android
 set from the existing rootfs or, on a first install after explicit
 confirmation, reads the four boot partitions. It writes only `linuxroot`; GPT,

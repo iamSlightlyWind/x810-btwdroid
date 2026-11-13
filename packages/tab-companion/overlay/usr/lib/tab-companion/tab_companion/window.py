@@ -213,8 +213,8 @@ class CompanionWindow(Adw.ApplicationWindow):
         )
         if legacy_ubuntu_update_available():
             # The preserved upstream APT/dpkg port updater includes the X910
-            # offline update path. Do not replace it with the generic Fedora/
-            # Arch package updater or expose it on other devices.
+            # offline update path. Do not replace it with the shared Linux
+            # system updater or expose it on other devices.
             from .backends.ubuntu_legacy.update_page import UpdatePage as UbuntuUpdatePage
             self.view_stack.add_titled_with_icon(
                 UbuntuUpdatePage(self), "ubuntu-system-updates", _("Ubuntu system"),
@@ -1087,7 +1087,7 @@ class CompanionWindow(Adw.ApplicationWindow):
             transient_for=self,
             application_name="Tab Companion",
             application_icon="dev.themajorones.slightlywind.companion",
-            developer_name=_("gts9wifi Fedora port contributors"),
+            developer_name=_("gts9wifi X810 port contributors"),
             version=VERSION,
             issue_url="https://github.com/iamSlightlyWind/tab-companion/issues",
             license_type=Gtk.License.MIT_X11,
