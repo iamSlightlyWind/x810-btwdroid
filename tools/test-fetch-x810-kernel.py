@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -27,23 +29,31 @@ class KernelReceiptTests(unittest.TestCase):
             (modules / "x810.ko").write_bytes(b"module-one")
             (modules / "x810.ko.zst").write_bytes(b"module-two")
             receipt_path = root / "kernel.json"
-            receipt = fetcher.write_kernel_receipt(
-                receipt_path,
-                {"tag_name": "x810-fedora-port-build-42"},
-                {"source_commit": "a" * 40},
-                {"sha256": "b" * 64, "size_bytes": 1234},
-                modules,
-            )
+            images = {name: {"sha256": hashlib.sha256(b"boot").hexdigest(), "size_bytes": 4}
+                      for name in fetcher.BOOT_IMAGE_SIZES}
+            (root / "boot").mkdir()
+            for name in images:
+                (root / "boot" / f"{name}.img").write_bytes(b"boot")
+            with patch.dict(fetcher.BOOT_IMAGE_SIZES, {name: 4 for name in images}):
+                receipt = fetcher.write_kernel_receipt(
+                    receipt_path,
+                    {"tag_name": "x810-fedora-port-build-42"},
+                    {"source_commit": "a" * 40},
+                    {"sha256": "b" * 64, "size_bytes": 1234},
+                    modules, images,
+                )
             self.assertEqual(receipt["repository"], "iamSlightlyWind/x810-fedroid")
             self.assertEqual(receipt["kernel_release"], "7.2.0-gts9wifi")
             self.assertEqual(receipt["kernel_rpm"], {"sha256": "b" * 64, "size_bytes": 1234})
             self.assertEqual(receipt["modules"]["file_count"], 2)
             self.assertEqual(json.loads(receipt_path.read_text()), receipt)
             self.assertEqual(receipt_path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(fetcher.validate_kernel_receipt(receipt_path, modules), receipt)
+            with patch.dict(fetcher.BOOT_IMAGE_SIZES, {name: 4 for name in images}):
+                self.assertEqual(fetcher.validate_kernel_receipt(receipt_path, modules), receipt)
 
             (modules / "x810.ko").write_bytes(b"changed")
-            with self.assertRaisesRegex(RuntimeError, "does not match its receipt"):
+            with patch.dict(fetcher.BOOT_IMAGE_SIZES, {name: 4 for name in images}), \
+                    self.assertRaisesRegex(RuntimeError, "does not match its receipt"):
                 fetcher.validate_kernel_receipt(receipt_path, modules)
 
     def test_receipt_rejects_missing_source_commit(self):
@@ -51,13 +61,15 @@ class KernelReceiptTests(unittest.TestCase):
             modules = Path(temporary) / "modules"
             modules.mkdir()
             (modules / "x810.ko").write_bytes(b"module")
+            boot_assets = {name: {"sha256": hashlib.sha256(b"boot").hexdigest(), "size_bytes": 4}
+                           for name in fetcher.BOOT_IMAGE_SIZES}
             with self.assertRaisesRegex(RuntimeError, "valid release provenance"):
                 fetcher.write_kernel_receipt(
                     Path(temporary) / "kernel.json",
                     {"tag_name": "kernel"},
                     {"source_commit": "bad"},
                     {"sha256": "b" * 64, "size_bytes": 1234},
-                    modules,
+                    modules, boot_assets,
                 )
 
     def test_module_identity_rejects_empty_trees(self):

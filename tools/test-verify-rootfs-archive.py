@@ -33,6 +33,12 @@ PACKAGES = (
     "noto-fonts",
     "tab-companion",
 )
+LINUX_BOOT_IMAGE_SIZES = {
+    "boot": 100_663_296,
+    "init_boot": 8_388_608,
+    "vendor_boot": 100_663_296,
+    "dtbo": 16_777_216,
+}
 
 
 class ArchiveFixture:
@@ -67,6 +73,23 @@ class ArchiveFixture:
         info.gid = gid
         info.size = len(data)
         archive.addfile(info, io.BytesIO(data))
+
+    @staticmethod
+    def add_zero_file(archive: tarfile.TarFile, name: str, size: int) -> None:
+        class ZeroReader:
+            def __init__(self, remaining: int) -> None:
+                self.remaining = remaining
+            def read(self, count: int = -1) -> bytes:
+                if self.remaining <= 0:
+                    return b""
+                count = self.remaining if count < 0 else min(count, self.remaining)
+                self.remaining -= count
+                return b"\0" * count
+        info = tarfile.TarInfo(name)
+        info.type = tarfile.REGTYPE
+        info.mode = 0o644
+        info.size = size
+        archive.addfile(info, ZeroReader(size))
 
     @staticmethod
     def add_dir(archive: tarfile.TarFile, name: str, *, mode: int = 0o755,
@@ -146,6 +169,9 @@ class ArchiveFixture:
                 (b"archarm snapshot_current_linux" if self.arch_dualboot_backend else b"legacy backend without Arch support"),
                 mode=0o755,
             )
+            self.add_file(archive, "var/lib/x810-boot-sets/fedora/name.txt", b"Arch Linux ARM\n")
+            for name, size in LINUX_BOOT_IMAGE_SIZES.items():
+                self.add_zero_file(archive, f"var/lib/x810-boot-sets/fedora/{name}.img", size)
             for name in ("tab-companion-boot-status", "tab-companion-boot-switch"):
                 self.add_file(archive, f"usr/local/libexec/{name}", b"#!/bin/sh\n", mode=0o755)
             self.add_file(archive, "usr/libexec/tab-companion-admin", b"#!/bin/sh\n", mode=0o755)

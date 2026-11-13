@@ -66,7 +66,7 @@ if gh release view "$REL" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
   echo "Refreshing existing aggregate release $REL."
 else
   gh release create "$REL" --repo "$GITHUB_REPOSITORY" --title "$REL" --latest=false \
-    --notes "Verified Arch Linux ARM GNOME/GDM rootfs and Tab Companion update package for SM-X810. Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. The installer formats only linuxroot; Android, boot partitions, GPT, and recovery are not written."
+    --notes "Verified Arch Linux ARM GNOME/GDM rootfs and Tab Companion update package for SM-X810. Built by $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. The installer backs up Android boot images, formats linuxroot, and writes only the four verified Linux boot partitions; it does not write GPT, userdata, recovery, vbmeta, or firmware."
 fi
 
 release_flags="$(gh release view "$REL" --repo "$GITHUB_REPOSITORY" --json isDraft,isPrerelease)"

@@ -1,10 +1,11 @@
 # X810 BTWDroid
 
 Arch Linux ARM GNOME rootfs and guarded installer for the Samsung Galaxy Tab
-S9+ Wi-Fi (SM-X810, `gts9pwifi`). The installer replaces only the existing
-`linuxroot` filesystem. It saves the four Android boot images to the host and
-seeds verified copies into the new rootfs, but never writes the Android, boot,
-GPT, or recovery partitions, and does not reboot.
+S9+ Wi-Fi (SM-X810, `gts9pwifi`). The installer formats the existing
+`linuxroot` filesystem. It saves the four Android boot images to the host,
+seeds verified copies into the new rootfs, and writes the verified Linux set to
+`boot`, `init_boot`, `vendor_boot`, and `dtbo`. It does not write GPT,
+userdata, recovery, vbmeta, or firmware, and does not reboot.
 
 ## Install
 
@@ -24,8 +25,8 @@ partitions as Android. `--no-update` selects an already cached release.
 
 ## Build and test
 
-The Fedora-style layout keeps the public installer in `tools/` and the
-internal build orchestration in `rootfs/`:
+The shared port layout keeps the public installer in `tools/` and the internal
+build orchestration in `rootfs/`:
 
 ```sh
 rootfs/build-rootfs.sh

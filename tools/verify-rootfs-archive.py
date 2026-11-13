@@ -14,6 +14,12 @@ import tarfile
 
 
 KERNEL_RELEASE = "7.2.0-gts9wifi"
+LINUX_BOOT_IMAGE_SIZES = {
+    "boot": 100_663_296,
+    "init_boot": 8_388_608,
+    "vendor_boot": 100_663_296,
+    "dtbo": 16_777_216,
+}
 REQUIRED_PROFILE_PACKAGES = {
     "x810-device-support", "zram-generator", "networkmanager", "wpa_supplicant",
     "openssh", "sudo", "gdm", "gnome-shell", "gnome-session",
@@ -169,6 +175,7 @@ def verify_archive(path: pathlib.Path,
     run_entries: list[str] = []
     symlinks: dict[str, str] = {}
     captured: dict[str, bytes] = {}
+    member_sizes: dict[str, int] = {}
     nm_profile_count = 0
     module_releases: set[str] = set()
     decompressor = subprocess.Popen(["zstd", "-q", "-dc", str(path)], stdout=subprocess.PIPE)
@@ -192,6 +199,8 @@ def verify_archive(path: pathlib.Path,
                         symlinks[normalized] = link_target
                 seen[normalized] = (member.uid, member.gid, stat.S_IMODE(member.mode),
                                     member.isfile() or member.isdir(), link_target)
+                if member.isfile():
+                    member_sizes[normalized] = member.size
 
                 # No secrets or host-specific bootstrap state may enter a
                 # public release. Only filenames are examined; file values
@@ -239,6 +248,7 @@ def verify_archive(path: pathlib.Path,
                     "usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json",
                     "usr/share/tab-companion/port.json",
                     "usr/share/tab-companion/port-build.json",
+                    "var/lib/x810-boot-sets/fedora/name.txt",
                 }:
                     captured[normalized] = _read_member(archive, member, normalized)
     finally:
@@ -372,6 +382,15 @@ def verify_archive(path: pathlib.Path,
             raise ValueError(f"archive is missing required dualboot helper: {helper}")
     if b"archarm" not in captured["usr/local/libexec/x810-boot-switch-core"]:
         raise ValueError("Arch-aware dualboot backend is missing or stale")
+    linux_boot_dir = "var/lib/x810-boot-sets/fedora"
+    if captured.get(f"{linux_boot_dir}/name.txt") != b"Arch Linux ARM\n":
+        raise ValueError("rootfs is missing the Arch Linux ARM boot-set label")
+    for name, size in LINUX_BOOT_IMAGE_SIZES.items():
+        path = f"{linux_boot_dir}/{name}.img"
+        record = seen.get(path)
+        if (record is None or not record[3] or record[4] or record[2] != 0o644
+                or member_sizes.get(path) != size):
+            raise ValueError(f"rootfs is missing a partition-sized Linux boot image: {name}")
 
 
 def main() -> int:

@@ -14,6 +14,12 @@ on:
       - ".gitignore"
       - ".github/workflows/x810-arch.yml"
   workflow_dispatch:
+    inputs:
+      rebuild:
+        description: "Rebuild and republish the current release even when its source commit is unchanged"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: write
@@ -85,8 +91,10 @@ jobs:
   # for the rootfs build. The support ZIP is a short-lived Actions artifact
   # until the final job publishes the one complete GitHub release.
   build_port_update:
-    needs: publication_identity
-    if: github.ref == 'refs/heads/main'
+    needs: [publication_identity, plan]
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.plan.outputs.reuse_release != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -247,6 +255,7 @@ jobs:
       source_commit: ${{ needs.publication_identity.outputs.commit }}
       branch: ${{ needs.publication_identity.outputs.branch }}
       port_version: ${{ steps.plan.outputs.port_version }}
+      reuse_release: ${{ steps.plan.outputs.reuse_release }}
     steps:
       - name: Check out the workflow commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -264,9 +273,11 @@ jobs:
       - name: Validate pinned bootstrap and plan the full release
         id: plan
         env:
+          GH_TOKEN: ${{ github.token }}
           SOURCE_COMMIT: ${{ needs.publication_identity.outputs.commit }}
           PUBLICATION_RUN_ID: ${{ needs.publication_identity.outputs.run_id }}
           PORT_VERSION_INPUT: ""
+          FORCE_REBUILD: ${{ inputs.rebuild || false }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_COMMIT" == "$GITHUB_SHA" ]] || {
@@ -306,23 +317,140 @@ jobs:
           PY
           release_tag="x810-arch-build-$PUBLICATION_RUN_ID"
           [[ "$release_tag" =~ ^x810-arch-build-[0-9]+$ ]]
+          reuse_release=false
+          if [[ "$FORCE_REBUILD" != true ]]; then
+            latest_tag="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name 2>/dev/null || true)"
+            if [[ "$latest_tag" == "$release_tag" ]]; then
+              check_dir="$RUNNER_TEMP/arch-release-reuse-$GITHUB_RUN_ID"
+              mkdir -p "$check_dir"
+              if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$latest_tag" \
+                    > "$check_dir/github-release.json" 2>/dev/null && \
+                 gh release download "$latest_tag" --repo "$GITHUB_REPOSITORY" --dir "$check_dir" \
+                    --pattern manifest.json --pattern SHA256SUMS >/dev/null 2>&1; then
+                if python3 - "$check_dir/manifest.json" "$check_dir/github-release.json" \
+                    "$check_dir/SHA256SUMS" "$release_tag" "$SOURCE_COMMIT" <<'PY'
+          import hashlib
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          manifest_path, release_path, sums_path, tag, commit = sys.argv[1:]
+          manifest_file, release_file, sums_file = map(Path, (manifest_path, release_path, sums_path))
+          manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+          release = json.loads(release_file.read_text(encoding="utf-8"))
+          if (not isinstance(manifest, dict) or isinstance(manifest.get("schema_version"), bool)
+                  or manifest.get("schema_version") != 1
+                  or manifest.get("type") != "x810-arch-release"
+                  or manifest.get("release_tag") != tag
+                  or manifest.get("source_commit") != commit
+                  or manifest.get("device") != {"model": "SM-X810", "codename": "gts9pwifi"}
+                  or manifest.get("os") != {"id": "archarm", "arch": "aarch64"}):
+              raise SystemExit(1)
+          if (release.get("tag_name") != tag or release.get("draft") is not False
+                  or release.get("prerelease") is not False):
+              raise SystemExit(1)
+          if not re.fullmatch(r"[0-9a-f]{64}", str(manifest.get("build_inputs_key", ""))):
+              raise SystemExit(1)
+          kernel = manifest.get("kernel")
+          boot = kernel.get("boot_images") if isinstance(kernel, dict) else None
+          expected_sizes = {"boot": 100663296, "init_boot": 8388608,
+                            "vendor_boot": 100663296, "dtbo": 16777216}
+          if not isinstance(boot, dict) or set(boot) != set(expected_sizes):
+              raise SystemExit(1)
+          for name, size in expected_sizes.items():
+              record = boot.get(name)
+              if (not isinstance(record, dict) or record.get("size_bytes") != size
+                      or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256", "")))):
+                  raise SystemExit(1)
+          assets = manifest.get("assets")
+          if (not isinstance(assets, list) or len(assets) != 2
+                  or any(not isinstance(item, dict) for item in assets)
+                  or {item.get("name") for item in assets} != {"rootfs.tar.zst", "update.zip"}):
+              raise SystemExit(1)
+          records = {item["name"]: item for item in assets}
+          rootfs = manifest.get("rootfs")
+          updater = manifest.get("port_update")
+          if (not isinstance(rootfs, dict) or rootfs.get("archive") != "rootfs.tar.zst"
+                  or not isinstance(updater, dict) or updater.get("archive") != "update.zip"):
+              raise SystemExit(1)
+          if any(not isinstance(record.get("size_bytes"), int)
+                 or isinstance(record.get("size_bytes"), bool)
+                 or record["size_bytes"] <= 0
+                 or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256", "")))
+                 for record in records.values()):
+              raise SystemExit(1)
+
+          api_assets = release.get("assets")
+          expected_names = {"rootfs.tar.zst", "manifest.json", "SHA256SUMS", "update.zip"}
+          if (not isinstance(api_assets, list) or len(api_assets) != len(expected_names)
+                  or any(not isinstance(item, dict) for item in api_assets)):
+              raise SystemExit(1)
+          api_by_name = {item.get("name"): item for item in api_assets}
+          if set(api_by_name) != expected_names:
+              raise SystemExit(1)
+          for name, api_asset in api_by_name.items():
+              digest = api_asset.get("digest")
+              if (not isinstance(api_asset.get("size"), int) or isinstance(api_asset.get("size"), bool)
+                      or api_asset["size"] <= 0 or not isinstance(digest, str)
+                      or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)):
+                  raise SystemExit(1)
+          for name, path in (("manifest.json", manifest_file), ("SHA256SUMS", sums_file)):
+              if (path.is_symlink() or not path.is_file()
+                      or path.stat().st_size != api_by_name[name]["size"]
+                      or hashlib.sha256(path.read_bytes()).hexdigest() != api_by_name[name]["digest"][7:]):
+                  raise SystemExit(1)
+
+          sums = {}
+          for line in sums_file.read_text(encoding="ascii").splitlines():
+              fields = line.split(maxsplit=1)
+              if len(fields) != 2 or not re.fullmatch(r"[0-9a-f]{64}", fields[0]):
+                  raise SystemExit(1)
+              sums[fields[1].lstrip("* ")] = fields[0]
+          if set(sums) != {"rootfs.tar.zst", "update.zip"}:
+              raise SystemExit(1)
+          for name, record in records.items():
+              api_asset = api_by_name[name]
+              if (api_asset.get("size") != record.get("size_bytes")
+                      or api_asset.get("digest") != "sha256:" + str(record.get("sha256", ""))
+                      or sums.get(name) != record.get("sha256")):
+                  raise SystemExit(1)
+          if (rootfs.get("size_bytes") != records["rootfs.tar.zst"].get("size_bytes")
+                  or rootfs.get("sha256") != records["rootfs.tar.zst"].get("sha256")
+                  or updater.get("size_bytes") != records["update.zip"].get("size_bytes")
+                  or updater.get("sha256") != records["update.zip"].get("sha256")):
+              raise SystemExit(1)
+          PY
+                then
+                  reuse_release=true
+                fi
+              fi
+            fi
+          fi
           {
             echo "release_tag=$release_tag"
             echo "port_version=$port_version"
+            echo "reuse_release=$reuse_release"
           } >> "$GITHUB_OUTPUT"
           {
             echo "### X810 Arch release plan"
-            echo "- Port version: `$port_version`; update bundle and rootfs are separate build stages."
-            echo "- Rootfs: always rebuild from the pinned Arch Linux ARM bootstrap because Arch repositories are rolling."
-            echo "- Kernel modules: resolve and verify the exact X810 module tree from the public Fedora kernel release."
-            echo "- Complete release: `$release_tag` (keyed to the successful push identity for Tab Companion)."
+            echo "- Port version: \`$port_version\`; update bundle and rootfs are separate build stages."
+            if [[ "$reuse_release" == true ]]; then
+              echo "- Complete release: inputs and checksums match the latest published release; **reuse \`$release_tag\` and skip every build**."
+            else
+              echo "- Complete release: no verified match (or rebuild requested); build the updater and rootfs."
+              echo "- Rootfs: rebuild from the pinned Arch Linux ARM bootstrap because Arch repositories are rolling."
+            fi
+            echo "- Kernel modules: resolve and verify the exact X810 module tree from the public kernel release."
+            echo "- Release tag: \`$release_tag\` (keyed to the successful push identity for Tab Companion)."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The existing device boot chain supplies the kernel. This stage mirrors
-  # Fedora's kernel component stage by resolving and handing off its exact
+  # The kernel component stage resolves and hands off its exact
   # verified module artifact; it does not build or flash a kernel.
   prepare_kernel_modules:
     needs: plan
+    if: needs.plan.outputs.reuse_release != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -336,7 +464,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes cpio rpm
 
-      - name: Download and verify the public X810 Fedora kernel RPM
+      - name: Download and verify the public X810 kernel RPM
         run: |
           set -euo pipefail
           python3 tools/fetch-x810-kernel.py --receipt cache/public-kernel/kernel.json
@@ -344,7 +472,8 @@ jobs:
           mkdir -p _ci/kernel
           cp cache/public-kernel/kernel.json _ci/kernel/kernel.json
           tar -C cache/public-kernel/usr/lib/modules -czf _ci/kernel/modules.tar.gz "$KVER"
-          (cd _ci/kernel && sha256sum kernel.json modules.tar.gz > SHA256SUMS)
+          tar -C cache/public-kernel -czf _ci/kernel/boot-images.tar.gz boot
+          (cd _ci/kernel && sha256sum kernel.json modules.tar.gz boot-images.tar.gz > SHA256SUMS)
 
       - name: Hand the verified module artifact to the rootfs job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
@@ -359,6 +488,7 @@ jobs:
     needs: [plan, prepare_kernel_modules]
     if: >-
       always() && needs.plan.result == 'success' &&
+      needs.plan.outputs.reuse_release != 'true' &&
       needs.prepare_kernel_modules.result == 'success'
     runs-on: ubuntu-24.04
     outputs:
@@ -396,7 +526,7 @@ jobs:
                   or receipt.get("repository") != "iamSlightlyWind/x810-fedroid"
                   or receipt.get("kernel_release") != "7.2.0-gts9wifi"
                   or not re.fullmatch(r"[0-9a-f]{40,64}", str(receipt.get("source_commit", "")))):
-              raise SystemExit("kernel input receipt does not identify a verified X810 Fedora release")
+              raise SystemExit("kernel input receipt does not identify a verified X810 release")
           if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("kernel_rpm", {}).get("sha256", ""))):
               raise SystemExit("kernel RPM digest is missing from the receipt")
           if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("modules", {}).get("sha256", ""))):
@@ -414,15 +544,16 @@ jobs:
           kernel_tag="$(python3 -c 'import json; print(json.load(open("_ci/kernel/kernel.json", encoding="utf-8"))["release_tag"])')"
           {
             echo "### Resolved Arch rootfs inputs"
-            echo "- Rootfs key: `$rootfs_key` (source commit including package recipes, kernel receipt and signed bootstrap lock; rolling repository transaction is intentionally not claimed reproducible)."
-            echo "- Rootfs action: **build** `$RELEASE_TAG`."
-            echo "- Matching X810 kernel modules: `$kernel_tag`."
+            echo "- Rootfs key: \`$rootfs_key\` (source commit including package recipes, kernel receipt and signed bootstrap lock; rolling repository transaction is intentionally not claimed reproducible)."
+            echo "- Rootfs action: **build** \`$RELEASE_TAG\`."
+            echo "- Matching X810 kernel modules: \`$kernel_tag\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   build_rootfs:
     needs: [plan, prepare_kernel_modules, resolve_rootfs]
     if: >-
       always() && needs.plan.result == 'success' &&
+      needs.plan.outputs.reuse_release != 'true' &&
       needs.prepare_kernel_modules.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
       needs.resolve_rootfs.outputs.build_rootfs == 'true'
@@ -510,6 +641,7 @@ jobs:
           mkdir -p cache/public-kernel/usr/lib/modules
           cp -- _ci/kernel/kernel.json cache/public-kernel/kernel.json
           tar -xzf _ci/kernel/modules.tar.gz -C cache/public-kernel/usr/lib/modules
+          tar -xzf _ci/kernel/boot-images.tar.gz -C cache/public-kernel
           python3 tools/fetch-x810-kernel.py --verify-prepared
 
       - name: Stage publication identity for the rootfs package build
@@ -602,6 +734,7 @@ jobs:
     if: >-
       always() && needs.plan.result == 'success' &&
       needs.build_port_update.result == 'success' &&
+      needs.plan.outputs.reuse_release != 'true' &&
       needs.prepare_kernel_modules.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
       needs.build_rootfs.result == 'success' &&

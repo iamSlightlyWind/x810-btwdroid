@@ -39,9 +39,12 @@ The installer does not fetch the large rootfs until the initial Android/TWRP
 identity and unlock checks pass. These commands do not write tablet partitions. The normal install requires a new
 account identity/password and exact confirmations. It reads a saved Android
 set from the existing rootfs or, on a first install after explicit
-confirmation, reads the four boot partitions. It writes only `linuxroot`; GPT,
-boot, recovery, vbmeta, userdata, and firmware partitions are not written, and
-it never reboots.
+confirmation, reads and backs up the four boot partitions. It formats
+`linuxroot`, installs the rootfs, then writes and read-back-verifies the Linux
+images to `boot`, `init_boot`, `vendor_boot`, and `dtbo`. GPT, userdata,
+recovery, vbmeta, and firmware are not written. It never reboots; the next
+normal boot should start Arch Linux ARM. The host backup retains Android's
+original boot images for the dual-boot switcher or manual recovery.
 
 The public rootfs build is `rootfs/build-rootfs.sh`; release publication uses
 the same script in GitHub Actions. See [ROOTFS-ARTIFACT.md](ROOTFS-ARTIFACT.md).

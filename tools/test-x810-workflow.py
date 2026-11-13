@@ -46,7 +46,8 @@ class ArchWorkflowTests(unittest.TestCase):
             ["prepare_kernel_modules" if job == "build_kernel" else job for job in fedora_jobs],
             list(expected),
         )
-        self.assertIn("build_port_update:\n    needs: publication_identity", self.text)
+        self.assertIn("build_port_update:\n    needs: [publication_identity, plan]", self.text)
+        self.assertIn("needs.plan.outputs.reuse_release != 'true'", self.text)
         self.assertNotIn("pull_request:", self.text)
 
     def test_publication_identity_is_the_same_fedora_gate_except_repo_paths(self):
@@ -115,6 +116,37 @@ class ArchWorkflowTests(unittest.TestCase):
         for publish in publishes:
             self.assertIn("    permissions:\n      actions: read\n      contents: write", publish)
             self.assertIn("needs.build_port_update.result == 'success'", publish)
+
+    def test_unchanged_manual_run_reuses_latest_complete_release_without_building(self):
+        plan = self.text.split("  plan:\n", 1)[1].split("  prepare_kernel_modules:\n", 1)[0]
+        self.assertIn("reuse_release: ${{ steps.plan.outputs.reuse_release }}", plan)
+        self.assertIn('FORCE_REBUILD: ${{ inputs.rebuild || false }}', plan)
+        self.assertIn('if [[ "$FORCE_REBUILD" != true ]]', plan)
+        self.assertIn('latest_tag" == "$release_tag"', plan)
+        self.assertIn('manifest.get("source_commit") != commit', plan)
+        self.assertIn('manifest.get("build_inputs_key", "")', plan)
+        self.assertIn('boot = kernel.get("boot_images")', plan)
+        self.assertIn('releases/tags/$latest_tag', plan)
+        self.assertIn('api_by_name[name]["digest"]', plan)
+        self.assertIn('--pattern manifest.json --pattern SHA256SUMS', plan)
+        self.assertNotIn('--pattern rootfs.tar.zst', plan)
+        self.assertNotIn('--pattern update.zip', plan)
+        self.assertIn(r'echo "- Complete release: inputs and checksums match the latest published release; **reuse \`$release_tag\`', plan)
+        self.assertIn("reuse_release=true", plan)
+        self.assertIn("skip every build", plan)
+        for job in ("build_port_update", "prepare_kernel_modules", "resolve_rootfs", "build_rootfs", "publish_full_set"):
+            block = self.text.split(f"  {job}:\n", 1)[1]
+            if job == "build_port_update":
+                block = block.split("  plan:\n", 1)[0]
+            elif job == "prepare_kernel_modules":
+                block = block.split("  resolve_rootfs:\n", 1)[0]
+            elif job == "resolve_rootfs":
+                block = block.split("  build_rootfs:\n", 1)[0]
+            elif job == "build_rootfs":
+                block = block.split("  publish_full_set:\n", 1)[0]
+            else:
+                block = block.split("  prune_old_releases:\n", 1)[0]
+            self.assertIn("reuse_release != 'true'", block, job)
 
     def test_port_update_job_builds_packages_and_hands_off_only_updater_bundle(self):
         update = self.text.split("  build_port_update:\n", 1)[1].split("  plan:\n", 1)[0]

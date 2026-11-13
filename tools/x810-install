@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Guarded host-side Arch rootfs installer for the Samsung SM-X810.
 
-It uses the shared guided preflight and confirmation flow while keeping the
-Arch install narrower: it accepts rooted/unlocked Android or an
-already-open TWRP session, and the sole block-device write is formatting the
-existing PARTLABEL=linuxroot as ext4. Before formatting, it saves the Android
-boot set to the host and seeds it into the new rootfs. It never writes GPT,
-Android userdata, boot images, recovery, vbmeta, or reboots.
+It accepts rooted/unlocked Android or an already-open TWRP session. Before
+formatting linuxroot, it saves Android's four boot images to the host; after
+extraction it stages them in linuxroot and writes the verified X810 Linux boot
+set to the four boot partitions. It never writes GPT, Android userdata,
+recovery, vbmeta, or reboots.
 """
 
 from __future__ import annotations
@@ -29,7 +28,7 @@ import urllib.error
 import urllib.request
 import unicodedata
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -60,7 +59,7 @@ LINUXROOT_LABEL = "linuxroot"
 LINUXROOT_TYPE_GUID = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 LINUXROOT_MIN_BYTES = 32 * 1024**3
 INSTALL_CONFIRMATION = "INSTALL ARCH ON SM-X810 AND ERASE LINUXROOT"
-FORMAT_CONFIRMATION = "FORMAT ONLY LINUXROOT ON SM-X810"
+FORMAT_CONFIRMATION = "FORMAT LINUXROOT AND INSTALL X810 LINUX BOOT SET ON SM-X810"
 ANDROID_BOOT_CONFIRMATION = "I CONFIRM THE CURRENT BOOT PARTITIONS ARE ANDROID"
 INSTALL_MOUNT = "/tmp/x810-arch-linuxroot"
 BOOT_IMAGE_SIZES = {
@@ -83,6 +82,7 @@ class InstallBundle:
     sha256: str
     size_bytes: int
     version: str
+    boot_images: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def latest_release(opener=urllib.request.urlopen) -> dict[str, Any] | None:
@@ -162,6 +162,16 @@ def _release_manifest(release: dict[str, Any], opener=urllib.request.urlopen) ->
             or manifest.get("os") != {"id": "archarm", "arch": "aarch64"}
             or manifest.get("kernel_release") != EXPECTED_KERNEL_RELEASE):
         raise ValueError("release manifest is not for this X810 Arch build")
+    kernel = manifest.get("kernel")
+    boot_images = kernel.get("boot_images") if isinstance(kernel, dict) else None
+    if not isinstance(boot_images, dict) or set(boot_images) != set(BOOT_IMAGE_SIZES):
+        raise ValueError("release manifest does not contain the verified X810 Linux boot set")
+    for name, expected_size in BOOT_IMAGE_SIZES.items():
+        record = boot_images[name]
+        if (not isinstance(record, dict) or record.get("size_bytes") != expected_size
+                or not isinstance(record.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", record["sha256"])):
+            raise ValueError(f"release manifest has invalid Linux {name} image provenance")
     print("Release manifest matches this X810; resolving required files and checksums...", flush=True)
     rootfs = manifest.get("rootfs")
     if not isinstance(rootfs, dict) or rootfs.get("archive") != "rootfs.tar.zst":
@@ -353,6 +363,7 @@ def _download_release_asset(asset: dict[str, Any], digest: str, size: int,
 
 
 def _verify_archive(project: Path, archive: Path, digest: str, size: int, version: str,
+                    boot_images: dict[str, dict[str, Any]] | None = None,
                     runner: Callable[..., subprocess.CompletedProcess[str]] = command) -> InstallBundle:
     if archive.is_symlink() or not archive.is_file():
         raise ValueError("release rootfs cache is missing or unsafe")
@@ -364,7 +375,10 @@ def _verify_archive(project: Path, archive: Path, digest: str, size: int, versio
     verified = runner([sys.executable, str(verifier), str(archive)], timeout=1800)
     if verified.returncode != 0:
         raise ValueError(f"rootfs content/metadata validation failed: {output(verified)}")
-    return InstallBundle(archive=archive, sha256=digest, size_bytes=size, version=version)
+    if not isinstance(boot_images, dict) or set(boot_images) != set(BOOT_IMAGE_SIZES):
+        raise ValueError("release does not include the complete X810 Linux boot set")
+    return InstallBundle(archive=archive, sha256=digest, size_bytes=size,
+                         version=version, boot_images=boot_images)
 
 
 def default_release_cache_root() -> Path:
@@ -420,7 +434,8 @@ def download_release_install_set(project: Path, release: dict[str, Any], opener=
     (cache / "release.json").write_text(json.dumps({
         "tag_name": tag, "published_at": release.get("published_at", ""),
     }, indent=2) + "\n", encoding="utf-8")
-    verified = _verify_archive(project, archive, rootfs["sha256"], rootfs["size_bytes"], tag, runner)
+    verified = _verify_archive(project, archive, rootfs["sha256"], rootfs["size_bytes"], tag,
+                               manifest["kernel"]["boot_images"], runner)
     return verified
 
 
@@ -448,7 +463,8 @@ def find_cached_install_bundle(project: Path,
             _validate_cached_manifest(manifest, release.get("tag_name"))
             rootfs = manifest["rootfs"]
             return _verify_archive(project, cache / "rootfs.tar.zst", rootfs["sha256"],
-                                   rootfs["size_bytes"], manifest["release_tag"], runner)
+                                   rootfs["size_bytes"], manifest["release_tag"],
+                                   manifest["kernel"]["boot_images"], runner)
         except (OSError, ValueError, KeyError):
             continue
     raise ValueError("cached X810 Arch releases were incomplete or failed verification")
@@ -824,10 +840,13 @@ def _read_android_set_from_existing_rootfs(client: ADBClient, backup: Path) -> d
                 fields = line.split()
                 if len(fields) >= 4 and fields[1] == mountpoint and fields[2] == "ext4":
                     options = set(fields[3].split(","))
-                    verified_mount = {"ro", "noload"}.issubset(options)
+                    # Android's ext4 driver reports the requested `noload`
+                    # option as `norecovery` in /proc/mounts. Both names mean
+                    # do not load/replay the journal; keep the explicit ro gate.
+                    verified_mount = "ro" in options and bool(options & {"noload", "norecovery"})
                     break
         if not verified_mount:
-            raise RuntimeError("old linuxroot mount is not verified ext4 ro,noload; refusing to inspect or format")
+            raise RuntimeError("old linuxroot mount is not verified ext4 read-only with journal replay disabled; refusing to inspect or format")
 
         android_dir = f"{mountpoint}/var/lib/x810-boot-sets/android"
         directory_exists = client.shell("test", "-d", android_dir).returncode == 0
@@ -1167,6 +1186,56 @@ def stage_android_boot_set(client: ADBClient, mountpoint: str,
             raise RuntimeError("staged Android boot-set label failed read-back verification")
 
 
+def flash_linux_boot_set(client: ADBClient, mountpoint: str, backup: Path,
+                         expected_images: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """Flash the image-verified X810 Linux boot set, preserving Android copies first."""
+    source_dir = f"{mountpoint}/var/lib/x810-boot-sets/fedora"
+    _verify_boot_partition_geometry(client)
+    digests: dict[str, str] = {}
+    with tempfile.TemporaryDirectory(prefix="x810-linux-boot-set-") as temporary:
+        stage = Path(temporary)
+        remote_stage = "/tmp/x810-linux-boot-set"
+        made = client.shell("mkdir", "-p", remote_stage)
+        if made.returncode != 0:
+            raise RuntimeError(f"could not create temporary boot-image staging directory: {output(made)}")
+        try:
+            for name, expected_size in BOOT_IMAGE_SIZES.items():
+                remote_source = f"{source_dir}/{name}.img"
+                local = stage / f"{name}.img"
+                pulled = client.pull(remote_source, local, timeout=600)
+                if pulled.returncode != 0 or not local.is_file() or local.stat().st_size != expected_size:
+                    raise RuntimeError(f"Linux {name} image is missing or has the wrong partition size")
+                digest = sha256_file(local)
+                expected = expected_images.get(name, {})
+                if expected.get("size_bytes") != expected_size or expected.get("sha256") != digest:
+                    raise RuntimeError(f"Linux {name} image does not match the verified release manifest")
+                digests[name] = digest
+                remote = f"{remote_stage}/{name}.img"
+                pushed = client.push(local, remote, timeout=600)
+                if pushed.returncode != 0:
+                    raise RuntimeError(f"could not stage Linux {name} image in TWRP: {output(pushed)}")
+                result = client.shell("dd", f"if={remote}", f"of=/dev/block/by-name/{name}",
+                                      "bs=4M", timeout=600)
+                if result.returncode != 0:
+                    raise RuntimeError(f"writing Linux {name} image failed: {output(result)}")
+                synced = client.shell("sync", timeout=120)
+                if synced.returncode != 0:
+                    raise RuntimeError(f"sync after writing Linux {name} failed")
+                readback = client.read_binary(
+                    f"dd if=/dev/block/by-name/{name} bs=4M 2>/dev/null", timeout=600
+                )
+                if len(readback) != expected_size or hashlib.sha256(readback).hexdigest() != digest:
+                    raise RuntimeError(f"Linux {name} image failed partition read-back verification")
+                print(f"[OK     ] Linux boot write  {name}: SHA-256 read-back verified")
+        finally:
+            client.shell("rm", "-rf", remote_stage, timeout=60)
+    (backup / "linux-boot-set-sha256.json").write_text(
+        json.dumps(digests, indent=2) + "\n", encoding="ascii"
+    )
+    os.chmod(backup / "linux-boot-set-sha256.json", 0o600)
+    return digests
+
+
 def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
     checks = (
         ("test", "-x", f"{mountpoint}/usr/bin/systemctl"),
@@ -1188,9 +1257,11 @@ def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
         ("test", "-L", f"{mountpoint}/etc/systemd/system/display-manager.service"),
         ("test", "-f", f"{mountpoint}/usr/lib/systemd/system/graphical.target"),
         ("test", "-f", f"{mountpoint}/var/lib/x810-boot-sets/android/name.txt"),
+        ("test", "-f", f"{mountpoint}/var/lib/x810-boot-sets/fedora/name.txt"),
     )
     for name in BOOT_IMAGE_SIZES:
         checks += (("test", "-f", f"{mountpoint}/var/lib/x810-boot-sets/android/{name}.img"),)
+        checks += (("test", "-f", f"{mountpoint}/var/lib/x810-boot-sets/fedora/{name}.img"),)
     for check in checks:
         result = client.shell(*check)
         if result.returncode != 0:
@@ -1226,6 +1297,11 @@ def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
     )
     if label != b"Android\n":
         raise RuntimeError("post-extraction check failed: Android boot-set label is incorrect")
+    linux_label = client.read_binary(
+        f"cat {shlex.quote(f'{mountpoint}/var/lib/x810-boot-sets/fedora/name.txt')}", timeout=30
+    )
+    if linux_label != b"Arch Linux ARM\n":
+        raise RuntimeError("post-extraction check failed: Linux boot-set label is incorrect")
 
 
 def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
@@ -1266,6 +1342,9 @@ def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
         raise RuntimeError(f"could not mount linuxroot read-only for verification: {output(remount)}")
     try:
         verify_extracted_rootfs(client, INSTALL_MOUNT)
+        # Do not replace Android's active boot set until the newly extracted
+        # rootfs passed its offline read-only filesystem and content checks.
+        flash_linux_boot_set(client, INSTALL_MOUNT, backup, bundle.boot_images)
     finally:
         unmounted = client.shell("umount", INSTALL_MOUNT, timeout=120)
         if unmounted.returncode != 0:
@@ -1274,10 +1353,11 @@ def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
     if sync.returncode != 0:
         raise RuntimeError("final sync failed")
     (backup / "INSTALL-COMPLETE.txt").write_text(
-        "Arch rootfs installed and read-back checked. Only PARTLABEL=linuxroot was formatted/written. "
-        "The four-image Android boot set was saved under boot/android/ and staged with size/SHA-256 "
-        "read-back verification at /var/lib/x810-boot-sets/android/. No Android partition, GPT, "
-        "boot image, recovery, vbmeta, userdata, or firmware was modified. No reboot was performed.\n",
+        "Arch rootfs installed and read-back checked. PARTLABEL=linuxroot was formatted. "
+        "The four Android boot images were backed up and staged at /var/lib/x810-boot-sets/android/. "
+        "The verified X810 Linux boot set was written to boot, init_boot, vendor_boot, and dtbo, "
+        "with partition read-back verification. GPT, Android userdata, recovery, vbmeta, and firmware "
+        "were not written. No reboot was performed; the next normal boot should start Arch Linux ARM.\n",
         encoding="utf-8",
     )
     os.chmod(backup / "INSTALL-COMPLETE.txt", 0o600)
@@ -1289,15 +1369,16 @@ def linuxroot_format_args() -> tuple[str, ...]:
 
 
 def print_plan(bundle: InstallBundle, partition: dict[str, Any]) -> None:
-    print("\nArch Linux ARM on Windstation (SM-X810) — rootfs-only installation plan")
+    print("\nArch Linux ARM on Windstation (SM-X810) — rootfs and boot-set installation plan")
     print(f"  Rootfs artifact: {bundle.archive.name} ({bundle.size_bytes:,} bytes)")
     print(f"  SHA-256: {bundle.sha256}")
     print(f"  Target: {partition['node']} ({partition['size_bytes']:,} bytes), ext4 label=linuxroot")
     print("  Rootfs profile: GNOME Shell + GDM + Tab Companion + matching X810 kernel modules")
-    print("  Block write: format only /dev/block/by-name/linuxroot as ext4")
-    print("  Boot backup: preserve Android boot/init_boot/vendor_boot/dtbo and stage verified copies in the new rootfs")
+    print("  Filesystem write: format /dev/block/by-name/linuxroot as ext4")
+    print("  Boot backup: save Android boot/init_boot/vendor_boot/dtbo, then stage them in the new rootfs")
+    print("  Boot write: verified X810 Linux boot/init_boot/vendor_boot/dtbo images, each read-back checked")
     print("  First install: if no Android set is already staged, current boot images require an explicit Android confirmation")
-    print("  Never written: GPT, userdata, super, boot, init_boot, vendor_boot, dtbo, recovery, vbmeta, firmware")
+    print("  Never written: GPT, userdata, super, recovery, vbmeta, firmware")
     print("  Reboot: none; the installer stops in TWRP")
     print("  Backup: host-side sda GPT metadata + four Android boot images; not a full partition/data backup")
 
@@ -1431,7 +1512,7 @@ def run_install(project: Path, bundle: InstallBundle | None, serial: str | None 
                 print("Confirmation did not match; no tablet writes were made.")
                 return 1
             try:
-                entered = input_func(f"Type `{FORMAT_CONFIRMATION}` to begin Arch writes: ").strip()
+                entered = input_func(f"Type exactly `{FORMAT_CONFIRMATION}` to format linuxroot and write the Linux boot set: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print(f"Cancelled before formatting; backups are retained at {backup}.")
                 return 1
@@ -1445,9 +1526,9 @@ def run_install(project: Path, bundle: InstallBundle | None, serial: str | None 
                 print(f"STOP: install stage failed: {error}")
                 print(f"Remain in TWRP and preserve the verified Android images in {backup / 'boot' / 'android'}; do not reboot until the failure is reviewed.")
                 return 2
-            print(f"\nArch rootfs extracted, fresh {account_details['username']} account created, and read-only filesystem verification passed.")
-            print(f"Install record / GPT and Android boot backups: {backup}")
-            print("No reboot was performed. Review the backup, then manually choose when to boot the tablet.")
+            print(f"\nArch rootfs and Linux boot set installed; fresh {account_details['username']} account created and read-only filesystem verification passed.")
+            print(f"Install record / GPT / Android boot backups: {backup}")
+            print("No reboot was performed. The next normal boot should start Arch Linux ARM; Android's original boot images are saved in the backup.")
             return 0
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as error:
         print(f"INSTALL STOPPED: {error}", file=sys.stderr)

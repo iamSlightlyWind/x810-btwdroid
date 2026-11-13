@@ -45,6 +45,7 @@ class RootfsImageProfileTests(unittest.TestCase):
             "tools/fetch-x810-kernel.py",
             "tools/upgrade-rootfs.sh",
             "tools/stage-x810-modules.sh",
+            "tools/stage-x810-boot-set.sh",
             "tools/stage-x810-wifi.sh",
             "tools/configure-ssh-rootfs.sh",
             "tools/build-packages.sh",
@@ -82,7 +83,9 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn("--no-update", installer)
         self.assertIn("rootfs.tar.zst", installer)
         self.assertIn("verify-rootfs-archive.py", installer)
-        self.assertIn("format only", installer.lower())
+        self.assertIn("linuxroot_format_args", installer)
+        self.assertIn("flash_linux_boot_set", installer)
+        self.assertIn("The next normal boot should start Arch Linux ARM", installer)
 
     def test_build_removes_generic_kernel_before_staging_x810_modules(self):
         script = (TOOLS.parent / "rootfs/build-rootfs.sh").read_text(encoding="utf-8")

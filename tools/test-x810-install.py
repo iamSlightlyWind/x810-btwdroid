@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Host-side unit checks for the Arch rootfs-only X810 installer."""
+"""Host-side unit checks for the Arch rootfs and boot-set X810 installer."""
 
 from __future__ import annotations
 
@@ -40,6 +40,8 @@ class FakeClient:
         return subprocess.CompletedProcess(["adb", *args], status, stdout, "")
 
     def read_binary(self, remote_command: str, timeout: int = 180):
+        if "/fedora/name.txt" in remote_command:
+            return b"Arch Linux ARM\n"
         if remote_command.endswith("name.txt"):
             return b"Android\n"
         return b""
@@ -68,7 +70,7 @@ class BootSetClient:
             pass
         elif args[:2] == ("cat", "/proc/mounts"):
             mount = next(call[-1] for call in self.calls if call[:2] == ("mount", "-t"))
-            stdout = f"{installer.LINUXROOT} {mount} ext4 ro,relatime,noload 0 0\n"
+            stdout = f"{installer.LINUXROOT} {mount} ext4 ro,relatime,norecovery 0 0\n"
         elif args[:2] == ("test", "-f"):
             filename = args[2].rsplit("/", 1)[-1]
             status = 0 if self.existing and (not self.partial or filename == "boot.img") else 1
@@ -104,6 +106,47 @@ class BootSetClient:
             path = shlex.split(remote_command)[1]
             return self.pushed.get(path, b"Android\n")
         return b""
+
+
+class LinuxBootFlashClient:
+    def __init__(self, rootfs_images: dict[str, Path], size_map: dict[str, int]):
+        self.rootfs_images = rootfs_images
+        self.size_map = size_map
+        self.staged: dict[str, bytes] = {}
+        self.partitions: dict[str, bytes] = {}
+        self.calls: list[tuple[str, ...]] = []
+
+    def shell(self, *args: str, timeout: int = 30):
+        self.calls.append(tuple(args))
+        status, stdout = 0, ""
+        if args[:2] == ("readlink", "-f") and args[2].startswith("/dev/block/by-name/"):
+            name = args[2].rsplit("/", 1)[-1]
+            stdout = installer.BOOT_PARTITION_NODES[name] + "\n"
+        elif args[:2] == ("blockdev", "--getsize64"):
+            name = args[2].rsplit("/", 1)[-1]
+            stdout = str(self.size_map[name]) + "\n"
+        elif args and args[0] == "dd":
+            source = args[1].removeprefix("if=")
+            target = args[2].removeprefix("of=")
+            if not target.startswith("/dev/block/by-name/"):
+                status = 1
+            else:
+                name = target.rsplit("/", 1)[-1]
+                self.partitions[name] = self.staged.get(source, b"")
+        return subprocess.CompletedProcess(["adb", *args], status, stdout, "")
+
+    def pull(self, source: str, destination: Path, timeout: int = 120):
+        name = source.rsplit("/", 1)[-1].removesuffix(".img")
+        Path(destination).write_bytes(self.rootfs_images[name].read_bytes())
+        return subprocess.CompletedProcess(["adb", "pull"], 0, "", "")
+
+    def push(self, source: Path, target: str, timeout: int = 60):
+        self.staged[target] = Path(source).read_bytes()
+        return subprocess.CompletedProcess(["adb", "push"], 0, "", "")
+
+    def read_binary(self, remote_command: str, timeout: int = 180):
+        name = remote_command.partition("if=")[2].split()[0].rsplit("/", 1)[-1]
+        return self.partitions.get(name, b"")
 
 
 class ProvisioningClient:
@@ -273,6 +316,57 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(
                 client.pushed["/mnt/new-root/var/lib/x810-boot-sets/android/name.txt"], b"Android\n"
             )
+
+    def test_linux_boot_set_is_written_only_after_manifest_hash_and_partition_checks(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            root = Path(temporary)
+            source_dir = root / "mnt/var/lib/x810-boot-sets/fedora"
+            source_dir.mkdir(parents=True)
+            images = {}
+            records = {}
+            for index, (name, size) in enumerate(sizes.items()):
+                image = source_dir / f"{name}.img"
+                image.write_bytes(bytes([index + 11]) * size)
+                digest = hashlib.sha256(image.read_bytes()).hexdigest()
+                images[name] = image
+                records[name] = {"size_bytes": size, "sha256": digest}
+            client = LinuxBootFlashClient(images, sizes)
+            backup = root / "backup"
+            backup.mkdir()
+
+            written = installer.flash_linux_boot_set(client, "/mnt", backup, records)
+
+            self.assertEqual(written, {name: item["sha256"] for name, item in records.items()})
+            self.assertEqual(set(client.partitions), set(sizes))
+            writes = [call for call in client.calls if call and call[0] == "dd" and any(arg.startswith("of=") for arg in call)]
+            self.assertEqual(
+                [call[2].removeprefix("of=/dev/block/by-name/") for call in writes],
+                list(sizes),
+            )
+            self.assertTrue((root / "backup/linux-boot-set-sha256.json").is_file())
+
+    def test_linux_boot_set_rejects_manifest_mismatch_before_any_partition_write(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            root = Path(temporary)
+            source_dir = root / "mnt/var/lib/x810-boot-sets/fedora"
+            source_dir.mkdir(parents=True)
+            images = {}
+            records = {}
+            for name, size in sizes.items():
+                image = source_dir / f"{name}.img"
+                image.write_bytes(b"X" * size)
+                images[name] = image
+                records[name] = {"size_bytes": size, "sha256": "0" * 64}
+            client = LinuxBootFlashClient(images, sizes)
+
+            with self.assertRaisesRegex(RuntimeError, "does not match the verified release manifest"):
+                installer.flash_linux_boot_set(client, "/mnt", root / "backup", records)
+
+            self.assertFalse(any(call and call[0] == "dd" for call in client.calls))
 
     def test_extracted_rootfs_rejects_missing_bluetooth_auto_enable(self):
         root = "/mnt/linuxroot"
@@ -608,6 +702,10 @@ Partition name: 'linuxroot'
             "device": {"model": installer.EXPECTED_MODEL, "codename": "gts9pwifi"},
             "os": {"id": "archarm", "arch": "aarch64"},
             "kernel_release": installer.EXPECTED_KERNEL_RELEASE,
+            "kernel": {"boot_images": {
+                name: {"size_bytes": size, "sha256": "b" * 64}
+                for name, size in installer.BOOT_IMAGE_SIZES.items()
+            }},
             "rootfs": {"archive": "rootfs.tar.zst", "size_bytes": 2048, "sha256": archive_hash},
         }
         payload = json.dumps(manifest).encode()
@@ -626,9 +724,13 @@ Partition name: 'linuxroot'
         with self.assertRaisesRegex(ValueError, "GitHub's asset digest"):
             installer._release_manifest(release, opener=lambda *_args, **_kwargs: io.BytesIO(payload))
 
-    def test_install_source_never_issues_partition_or_reboot_commands(self):
+    def test_install_source_writes_only_linux_boot_partitions_and_never_reboots(self):
         source = SCRIPT.read_text(encoding="utf-8")
-        self.assertNotIn('client.shell("dd"', source)
+        self.assertIn('client.shell("dd", f"if={remote}"', source)
+        install_body = source.split("def format_and_install(", 1)[1].split("\ndef linuxroot_format_args", 1)[0]
+        self.assertLess(install_body.index("verify_extracted_rootfs"), install_body.index("flash_linux_boot_set"))
+        for forbidden in ("userdata", "super", "recovery", "vbmeta", "metadata"):
+            self.assertNotIn(f"/dev/block/by-name/{forbidden}", source)
         self.assertNotIn('client.shell("reboot"', source)
         self.assertNotIn('client.run("reboot"', source)
         self.assertNotIn('"userdata", "FORMAT"', source)

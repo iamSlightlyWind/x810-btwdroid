@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Fetch the public X810 kernel RPM and extract its matching module tree.
+"""Fetch the verified public X810 kernel RPM and boot images, and extract modules.
 
-The Arch rootfs intentionally uses the module package from the public X810
-Fedora release: the tablet's boot/kernel partitions are not touched by the
-Arch installer. The GitHub release manifest and asset digest are checked
-before the RPM payload is extracted.
+The Arch rootfs uses the public X810 kernel's matching module and boot-image
+artifacts. They are staged into the Linux boot set so the installer can
+preserve Android's original images, install the verified Linux images, and
+read-back-check the new boot chain. Release manifest and asset digests are
+checked before use.
 """
 
 from __future__ import annotations
@@ -30,6 +31,12 @@ MODEL = "SM-X810"
 CODENAME = "gts9pwifi"
 KERNEL_RELEASE = "7.2.0-gts9wifi"
 USER_AGENT = "x810-btwdroid-build/1"
+BOOT_IMAGE_SIZES = {
+    "boot": 100_663_296,
+    "init_boot": 8_388_608,
+    "vendor_boot": 100_663_296,
+    "dtbo": 16_777_216,
+}
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -58,7 +65,7 @@ def module_tree_identity(root: Path) -> tuple[str, int]:
 
 def write_kernel_receipt(
     path: Path, release: dict[str, Any], manifest: dict[str, Any],
-    asset: dict[str, Any], module_root: Path,
+    asset: dict[str, Any], module_root: Path, boot_assets: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     module_sha256, module_count = module_tree_identity(module_root)
     receipt = {
@@ -74,6 +81,10 @@ def write_kernel_receipt(
         "modules": {
             "sha256": module_sha256,
             "file_count": module_count,
+        },
+        "boot_images": {
+            name: {"sha256": record["sha256"], "size_bytes": record["size_bytes"]}
+            for name, record in boot_assets.items()
         },
     }
     if (not isinstance(receipt["release_tag"], str) or not receipt["release_tag"]
@@ -112,6 +123,17 @@ def validate_kernel_receipt(path: Path, module_root: Path) -> dict[str, Any]:
         raise RuntimeError("prepared X810 module tree does not match its receipt")
     if not (module_root / "modules.dep").is_file() or (module_root / "modules.dep").stat().st_size == 0:
         raise RuntimeError("prepared X810 module tree is missing modules.dep")
+    boot_images = receipt.get("boot_images")
+    if not isinstance(boot_images, dict) or set(boot_images) != set(BOOT_IMAGE_SIZES):
+        raise RuntimeError("kernel receipt is missing the complete X810 Linux boot set")
+    for name, size in BOOT_IMAGE_SIZES.items():
+        record = boot_images[name]
+        image = path.parent / "boot" / f"{name}.img"
+        if (not isinstance(record, dict) or record.get("size_bytes") != size
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("sha256", "")))
+                or image.is_symlink() or not image.is_file() or image.stat().st_size != size
+                or sha256_file(image) != record["sha256"]):
+            raise RuntimeError(f"prepared X810 {name}.img does not match its verified release receipt")
     return receipt
 
 
@@ -144,7 +166,7 @@ def release_kernel_asset(release: dict[str, Any], opener=urllib.request.urlopen)
     manifest_asset = by_name.get("manifest.json")
     kernel_asset = by_name.get("kernel.rpm")
     if not isinstance(manifest_asset, dict) or not isinstance(kernel_asset, dict):
-        raise RuntimeError("latest X810 Fedora release is missing manifest.json or kernel.rpm")
+        raise RuntimeError("latest public X810 kernel release is missing manifest.json or kernel.rpm")
     url = manifest_asset.get("browser_download_url")
     size = manifest_asset.get("size")
     digest = manifest_asset.get("digest")
@@ -193,6 +215,36 @@ def release_kernel_asset(release: dict[str, Any], opener=urllib.request.urlopen)
             "url": kernel_url}, manifest
 
 
+def release_boot_assets(release: dict[str, Any], manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    github_assets = release.get("assets")
+    records = manifest.get("assets")
+    if not isinstance(github_assets, list) or not isinstance(records, list):
+        raise RuntimeError("X810 kernel release has no asset inventory")
+    github_by_name = {item.get("name"): item for item in github_assets if isinstance(item, dict)}
+    records_by_name: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if isinstance(record, dict) and isinstance(record.get("name"), str):
+            records_by_name.setdefault(record["name"], []).append(record)
+    result: dict[str, dict[str, Any]] = {}
+    for name, expected_size in BOOT_IMAGE_SIZES.items():
+        filename = f"{name}.img"
+        matches = records_by_name.get(filename, [])
+        asset = github_by_name.get(filename)
+        if len(matches) != 1 or not isinstance(asset, dict):
+            raise RuntimeError(f"X810 release must contain exactly one verified {filename}")
+        record = matches[0]
+        size = record.get("size_bytes")
+        digest = record.get("sha256")
+        url = asset.get("browser_download_url")
+        if (size != expected_size or asset.get("size") != expected_size
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or asset.get("digest") not in (None, f"sha256:{digest}")
+                or not isinstance(url, str) or not url.startswith("https://github.com/")):
+            raise RuntimeError(f"X810 release {filename} metadata does not match the expected partition image")
+        result[name] = {"name": filename, "size_bytes": size, "sha256": digest, "url": url}
+    return result
+
+
 def download_asset(asset: dict[str, Any], destination: Path, opener=urllib.request.urlopen) -> None:
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if destination.is_symlink():
@@ -203,7 +255,7 @@ def download_asset(asset: dict[str, Any], destination: Path, opener=urllib.reque
     request = urllib.request.Request(asset["url"], headers={"User-Agent": USER_AGENT})
     digest = hashlib.sha256()
     size = 0
-    print("Downloading verified kernel.rpm from the latest public X810 release...", flush=True)
+    print(f"Downloading verified {asset['name']} from the public X810 release...", flush=True)
     try:
         with opener(request, timeout=120) as response, temporary.open("xb") as output:
             while True:
@@ -212,11 +264,11 @@ def download_asset(asset: dict[str, Any], destination: Path, opener=urllib.reque
                     break
                 size += len(block)
                 if size > asset["size_bytes"]:
-                    raise RuntimeError("kernel.rpm download exceeds its manifest size")
+                    raise RuntimeError(f"{asset['name']} download exceeds its manifest size")
                 digest.update(block)
                 output.write(block)
         if size != asset["size_bytes"] or digest.hexdigest() != asset["sha256"]:
-            raise RuntimeError("kernel.rpm download failed manifest size/SHA-256 verification")
+            raise RuntimeError(f"{asset['name']} download failed manifest size/SHA-256 verification")
         os.chmod(temporary, 0o644)
         os.replace(temporary, destination)
     finally:
@@ -293,12 +345,20 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         release = fetch_json(RELEASE_API)
         asset, manifest = release_kernel_asset(release)
+        boot_assets = release_boot_assets(release, manifest)
         print(f"Using {release['tag_name']} ({manifest.get('source_commit', 'commit not recorded')}).", flush=True)
         rpm = cache / "kernel.rpm"
         if not rpm.is_file() or rpm.is_symlink() or rpm.stat().st_size != asset["size_bytes"] or sha256_file(rpm) != asset["sha256"]:
             download_asset(asset, rpm)
         module_root = extract_modules(rpm, cache)
-        receipt = write_kernel_receipt(args.receipt, release, manifest, asset, module_root)
+        boot_cache = cache / "boot"
+        for name, boot_asset in boot_assets.items():
+            image = boot_cache / boot_asset["name"]
+            if (not image.is_file() or image.is_symlink()
+                    or image.stat().st_size != boot_asset["size_bytes"]
+                    or sha256_file(image) != boot_asset["sha256"]):
+                download_asset(boot_asset, image)
+        receipt = write_kernel_receipt(args.receipt, release, manifest, asset, module_root, boot_assets)
         print(f"Kernel release: {KERNEL_RELEASE}; RPM SHA-256: {asset['sha256']}")
         print(f"Kernel receipt: {args.receipt}; module objects: {receipt['modules']['file_count']}")
         return 0

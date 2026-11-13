@@ -15,8 +15,17 @@ downloads the release manifest and rootfs, verifies GitHub metadata and the
 declared SHA-256/size, then performs content validation before showing an
 install plan.
 
-Actions caches only reusable source and package downloads, not a previously
-assembled rootfs. Arch's rolling repository cache is external to the staged
+Before starting the expensive jobs, `plan` validates the latest complete
+release's source commit, GitHub asset digests/sizes, rootfs manifest,
+boot-image records, and checksum file. It downloads only the small manifest and
+checksum file—not the multi-gigabyte rootfs—to make this decision. When it is
+the already-published release for the same successful push, it reuses that
+release and skips all build/publish jobs. A manual `rebuild` dispatch bypasses
+reuse for refreshing the rolling Arch package set.
+
+Actions caches reusable source and package downloads; the published rootfs is
+reused only as part of an unchanged complete release, not as a cross-commit
+build cache. Arch's rolling repository cache is external to the staged
 image, is used with full signed `pacman -Syu` transactions, and is pruned to
 the installed package versions before the next run saves it. The release
 archive separately clears any bootstrap-local package archives and sync DBs.
