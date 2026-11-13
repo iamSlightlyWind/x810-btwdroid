@@ -3,11 +3,16 @@
 FROM docker.io/library/archlinux@sha256:fcee73ea1b96e236248f53a213f71276cc9072d9025b58bce9915e32f19963ae
 
 ARG PROOT_COMMIT=25dc6a3134891f98a79f57ce1c2c1b23ff15cad1
+ARG X810_EXTERNAL_PACMAN_CACHE=0
 
 # Use one complete Arch transaction (not a partial -Sy install).
 RUN pacman -Syu --noconfirm --needed \
       base-devel git pkgconf libarchive talloc qemu-user-static \
- && rm -f /var/cache/pacman/pkg/* \
+ && if [ "${X810_EXTERNAL_PACMAN_CACHE}" = 1 ]; then \
+      pacman -Sc --noconfirm; \
+    else \
+      rm -f /var/cache/pacman/pkg/*; \
+    fi \
  && rm -rf /var/lib/pacman/sync/*
 
 # Build Arch packages as a normal user; UID 1000 is mapped with --userns=keep-id.

@@ -18,6 +18,16 @@ updater job. Arch uses the existing Fedora kernel release rather than building
 a kernel. Because Arch repositories roll, every rootfs is freshly built rather
 than reused from a source-only fingerprint.
 
+GitHub Actions uses separate restore/save caches like the Fedora workflow:
+the signed bootstrap is keyed by `ALARM-ROOTFS.lock`, builder package archives
+and makepkg sources are cached per independent build job, and verified pacman
+package archives are cached for rolling-rootfs transactions. The rolling
+cache is mounted outside `work/rootfs`; every image runs a full `pacman -Syu`
+with signature checking, then prunes cached archives not matching installed
+packages. Repository sync data and any bootstrap-local package cache are
+removed from the staged image before audit. The rootfs itself is never reused
+from Actions cache because current Arch repositories make that result stale.
+
 The internal script downloads the pinned Arch ARM bootstrap, stages the
 matching module tree, builds the GNOME profile, audits it, and creates the
 rootfs set under `out/`. It refuses a non-empty `work/rootfs`; move a staged

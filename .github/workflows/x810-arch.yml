@@ -84,6 +84,7 @@ jobs:
     env:
       PODMAN_ROOT_OVERRIDE: /tmp/x810-arch-package-root
       PODMAN_RUNROOT_OVERRIDE: /tmp/x810-arch-package-run
+      X810_BUILDER_PACMAN_CACHE_DIR: ${{ runner.temp }}/x810-arch-builder-pacman-cache
       BUILD_RUN_ID: ${{ needs.publication_identity.outputs.run_id }}
       BUILD_RUN_NUMBER: ${{ needs.publication_identity.outputs.run_number }}
       BUILD_COMMIT: ${{ needs.publication_identity.outputs.commit }}
@@ -93,6 +94,22 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Restore Arch builder package cache
+        id: restore_port_builder_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          key: x810-arch-builder-pacman-port-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: x810-arch-builder-pacman-port-${{ runner.arch }}-
+
+      - name: Restore makepkg source cache
+        id: restore_port_sources
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/makepkg/sources
+          key: x810-makepkg-port-${{ runner.arch }}-${{ hashFiles('packages/**/PKGBUILD') }}-v1
+          restore-keys: x810-makepkg-port-${{ runner.arch }}-
 
       - name: Install Arch package build tools
         run: |
@@ -137,6 +154,7 @@ jobs:
           echo "PORT_VERSION=$port_version" >> "$GITHUB_ENV"
 
       - name: Build the Arch support packages
+        id: build_packages
         run: |
           set -euo pipefail
           tools/build-builder-image.sh
@@ -155,6 +173,41 @@ jobs:
           done
           (cd _ci/packages && sha256sum ./*.pkg.tar.zst > SHA256SUMS)
           cp -- packages/x810-device-support/files/usr/share/tab-companion/port-build.json _ci/packages/port-build.json
+
+      - name: Finalize Arch builder and makepkg caches
+        id: finalize_port_caches
+        if: ${{ always() && !cancelled() && steps.build_packages.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          builder_cache="$RUNNER_TEMP/x810-arch-builder-pacman-cache"
+          source_cache="$GITHUB_WORKSPACE/work/makepkg/sources"
+          mkdir -p "$builder_cache" "$source_cache"
+          sudo chown -R "$(id -u):$(id -g)" "$builder_cache" "$source_cache"
+          find "$builder_cache" "$source_cache" -type f \( -name '*.part' -o -name '*.tmp' \) -delete
+          if find "$builder_cache" -type f -name '*.pkg.tar.*' -print -quit | grep -q .; then
+            echo "has_builder_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_builder_cache=false" >> "$GITHUB_OUTPUT"
+          fi
+          if find "$source_cache" -type f -print -quit | grep -q .; then
+            echo "has_source_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_source_cache=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Arch builder package cache
+        if: ${{ always() && !cancelled() && steps.restore_port_builder_cache.outputs.cache-hit != 'true' && steps.finalize_port_caches.outcome == 'success' && steps.finalize_port_caches.outputs.has_builder_cache == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          key: x810-arch-builder-pacman-port-${{ runner.arch }}-${{ github.run_id }}
+
+      - name: Save makepkg source cache
+        if: ${{ always() && !cancelled() && steps.restore_port_sources.outputs.cache-hit != 'true' && steps.finalize_port_caches.outcome == 'success' && steps.finalize_port_caches.outputs.has_source_cache == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/makepkg/sources
+          key: x810-makepkg-port-${{ runner.arch }}-${{ hashFiles('packages/**/PKGBUILD') }}-v1
       - name: Build the Tab Companion updater bundle
         run: |
           set -euo pipefail
@@ -372,6 +425,8 @@ jobs:
     env:
       PODMAN_ROOT_OVERRIDE: /tmp/x810-arch-rootfs-root
       PODMAN_RUNROOT_OVERRIDE: /tmp/x810-arch-rootfs-run
+      X810_BUILDER_PACMAN_CACHE_DIR: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+      X810_PACMAN_CACHE_DIR: ${{ runner.temp }}/x810-arch-rootfs-pacman-cache
       X810_RELEASE_TAG: ${{ needs.resolve_rootfs.outputs.rootfs_tag }}
       X810_BUILD_INPUTS_KEY: ${{ needs.resolve_rootfs.outputs.rootfs_key }}
       X810_PREBUILT_KERNEL_MODULES: "1"
@@ -381,12 +436,60 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Restore pinned Arch Linux ARM bootstrap
+        id: restore_bootstrap
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            cache/ArchLinuxARM-aarch64-latest.tar.gz
+            cache/ArchLinuxARM-aarch64-latest.tar.gz.sig
+          key: x810-alarm-bootstrap-${{ runner.arch }}-${{ hashFiles('docs/ALARM-ROOTFS.lock') }}-v1
+
+      - name: Restore Arch builder package cache
+        id: restore_rootfs_builder_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          key: x810-arch-builder-pacman-rootfs-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: x810-arch-builder-pacman-rootfs-${{ runner.arch }}-
+
+      - name: Restore rolling rootfs package cache
+        id: restore_rootfs_pacman_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/x810-arch-rootfs-pacman-cache
+          key: x810-arch-rootfs-pacman-${{ runner.arch }}-${{ github.run_id }}
+          restore-keys: x810-arch-rootfs-pacman-${{ runner.arch }}-
+
+      - name: Restore rootfs makepkg source cache
+        id: restore_rootfs_sources
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/makepkg/sources
+          key: x810-makepkg-rootfs-${{ runner.arch }}-${{ hashFiles('packages/**/PKGBUILD') }}-v1
+          restore-keys: x810-makepkg-rootfs-${{ runner.arch }}-
+
       - name: Install rootfs build tools
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --yes podman zstd gnupg cpio rpm
           command -v rpm2cpio
+
+      - name: Fetch and verify the pinned Arch Linux ARM bootstrap
+        run: |
+          set -euo pipefail
+          python3 tools/fetch-alarm-rootfs.py
+          tools/verify-alarm-rootfs.sh
+
+      - name: Save pinned Arch Linux ARM bootstrap cache
+        if: ${{ success() && steps.restore_bootstrap.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            cache/ArchLinuxARM-aarch64-latest.tar.gz
+            cache/ArchLinuxARM-aarch64-latest.tar.gz.sig
+          key: x810-alarm-bootstrap-${{ runner.arch }}-${{ hashFiles('docs/ALARM-ROOTFS.lock') }}-v1
 
       - name: Download the exact X810 kernel module artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
@@ -417,7 +520,56 @@ jobs:
             "$PORT_VERSION" "$BUILD_RUN_ID" "$BUILD_RUN_NUMBER" "$BUILD_COMMIT" "$BUILD_BRANCH"
 
       - name: Build and audit the complete Arch GNOME rootfs
+        id: build_rootfs_image
         run: rootfs/build-rootfs.sh
+
+      - name: Finalize Arch rootfs caches after build attempt
+        id: finalize_rootfs_caches
+        if: ${{ always() && !cancelled() && steps.build_rootfs_image.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          builder_cache="$RUNNER_TEMP/x810-arch-builder-pacman-cache"
+          pacman_cache="$RUNNER_TEMP/x810-arch-rootfs-pacman-cache"
+          source_cache="$GITHUB_WORKSPACE/work/makepkg/sources"
+          mkdir -p "$builder_cache" "$pacman_cache" "$source_cache"
+          sudo chown -R "$(id -u):$(id -g)" "$builder_cache" "$pacman_cache" "$source_cache"
+          find "$builder_cache" "$pacman_cache" "$source_cache" -type f \( -name '*.part' -o -name '*.tmp' \) -delete
+          if find "$builder_cache" -type f -name '*.pkg.tar.*' -print -quit | grep -q .; then
+            echo "has_builder_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_builder_cache=false" >> "$GITHUB_OUTPUT"
+          fi
+          if find "$pacman_cache" -type f -name '*.pkg.tar.*' -print -quit | grep -q .; then
+            echo "has_pacman_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_pacman_cache=false" >> "$GITHUB_OUTPUT"
+          fi
+          if find "$source_cache" -type f -print -quit | grep -q .; then
+            echo "has_source_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_source_cache=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save Arch builder package cache
+        if: ${{ always() && !cancelled() && steps.restore_rootfs_builder_cache.outputs.cache-hit != 'true' && steps.finalize_rootfs_caches.outcome == 'success' && steps.finalize_rootfs_caches.outputs.has_builder_cache == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          key: x810-arch-builder-pacman-rootfs-${{ runner.arch }}-${{ github.run_id }}
+
+      - name: Save rolling rootfs package cache
+        if: ${{ always() && !cancelled() && steps.restore_rootfs_pacman_cache.outputs.cache-hit != 'true' && steps.finalize_rootfs_caches.outcome == 'success' && steps.finalize_rootfs_caches.outputs.has_pacman_cache == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/x810-arch-rootfs-pacman-cache
+          key: x810-arch-rootfs-pacman-${{ runner.arch }}-${{ github.run_id }}
+
+      - name: Save rootfs makepkg source cache
+        if: ${{ always() && !cancelled() && steps.restore_rootfs_sources.outputs.cache-hit != 'true' && steps.finalize_rootfs_caches.outcome == 'success' && steps.finalize_rootfs_caches.outputs.has_source_cache == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: work/makepkg/sources
+          key: x810-makepkg-rootfs-${{ runner.arch }}-${{ hashFiles('packages/**/PKGBUILD') }}-v1
 
       - name: Checksum the verified rootfs release assets
         run: |

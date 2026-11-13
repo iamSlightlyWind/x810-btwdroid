@@ -151,9 +151,12 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn("-name alarm", audit)
         profile = (TOOLS / "install-gnome-profile.sh").read_text(encoding="utf-8")
         self.assertIn('"$script_dir/scrub-rootfs-private-state.sh"', profile)
-        self.assertIn("printf 'y\\ny\\n' |", profile)
-        self.assertIn('pacman-target.sh" --builder-mode -Scc', profile)
-        self.assertLess(profile.index('--builder-mode -Scc'), profile.index('"$script_dir/audit-rootfs.sh"'))
+        self.assertIn('pacman-target.sh" --builder-mode -Sc --noconfirm', profile)
+        self.assertIn('"$script_dir/clean-rootfs-cache.sh"', profile)
+        self.assertNotIn('--builder-mode -Scc', profile)
+        self.assertLess(profile.index('"$script_dir/clean-rootfs-cache.sh"'), profile.index('"$script_dir/audit-rootfs.sh"'))
+        cleaner = (TOOLS / "clean-rootfs-cache.sh").read_text(encoding="utf-8")
+        self.assertIn('Path("/project/work/rootfs")', cleaner)
         self.assertIn("Private SSH or Wi-Fi credential path remains in target rootfs", audit)
         self.assertIn('audit_check "downloaded pacman package archives are absent" no_cached_packages', audit)
         scrub = (TOOLS / "scrub-rootfs-private-state.sh").read_text(encoding="utf-8")
@@ -252,6 +255,8 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertNotIn("DisableSandboxSyscalls", pacman_target)
         self.assertIn("DisableSandboxFilesystem", pacman_target)
         self.assertIn("--builder-config", pacman_target)
+        self.assertIn("X810_PACMAN_CACHE_DIR", pacman_target)
+        self.assertIn("/work/pacman-cache", pacman_target)
         self.assertIn("trap cleanup EXIT", pacman_target)
 
     def test_audit_container_script_does_not_break_outer_single_quote(self):
@@ -296,6 +301,7 @@ class RootfsImageProfileTests(unittest.TestCase):
             fake_bin = temp / "bin"
             fake_bin.mkdir()
             captured = temp / "builder-pacman.conf"
+            captured_args = temp / "podman-args"
             podman_stub = fake_bin / "podman"
             podman_stub.write_text(
                 "#!/usr/bin/env bash\n"
@@ -306,6 +312,7 @@ class RootfsImageProfileTests(unittest.TestCase):
                 "    *:/work/pacman-builder.conf:ro) builder_conf=\"${arg%%:/work/pacman-builder.conf:ro}\" ;;\n"
                 "  esac\n"
                 "done\n"
+                "printf '%s\\n' \"$@\" > \"$CAPTURE_PODMAN_ARGS\"\n"
                 "test -n \"$builder_conf\"\n"
                 "cp -- \"$builder_conf\" \"$CAPTURE_BUILDER_CONF\"\n"
                 "exit 23\n",
@@ -315,6 +322,8 @@ class RootfsImageProfileTests(unittest.TestCase):
             environment = os.environ.copy()
             environment["PATH"] = f"{fake_bin}:{environment.get('PATH', '')}"
             environment["CAPTURE_BUILDER_CONF"] = str(captured)
+            environment["CAPTURE_PODMAN_ARGS"] = str(captured_args)
+            environment["X810_PACMAN_CACHE_DIR"] = str(temp / "pacman-cache")
             result = subprocess.run(
                 [str(test_tools / "pacman-target.sh"), "--builder-mode", "-Q", "pacman"],
                 check=False,
@@ -328,6 +337,11 @@ class RootfsImageProfileTests(unittest.TestCase):
             builder_text = captured.read_text(encoding="utf-8")
             self.assertEqual(builder_text.count("\nDisableSandboxFilesystem\n"), 1)
             self.assertEqual(builder_text.count("\nDisableSandboxSyscalls\n"), 1)
+            self.assertIn("CacheDir = /work/pacman-cache", builder_text)
+            self.assertIn(
+                f"{temp / 'pacman-cache'}:/work/pacman-cache:rw",
+                captured_args.read_text(encoding="utf-8").splitlines(),
+            )
             self.assertIn("DownloadUser = root", builder_text)
             self.assertEqual(target_conf.read_bytes(), original)
             self.assertEqual(list((project / "tmp").glob("pacman-config.*")), [])

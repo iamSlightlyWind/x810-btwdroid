@@ -15,6 +15,12 @@ downloads the release manifest and rootfs, verifies GitHub metadata and the
 declared SHA-256/size, then performs content validation before showing an
 install plan.
 
+Actions caches only reusable source and package downloads, not a previously
+assembled rootfs. Arch's rolling repository cache is external to the staged
+image, is used with full signed `pacman -Syu` transactions, and is pruned to
+the installed package versions before the next run saves it. The release
+archive separately clears any bootstrap-local package archives and sync DBs.
+
 The public archive is a generic installer image: its locked `alarm` seed is
 replaced on every install with the account entered during that run. Build-time
 account data, host SSH keys, authorized keys, saved NetworkManager profiles,

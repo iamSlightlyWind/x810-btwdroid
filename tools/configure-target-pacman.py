@@ -71,8 +71,14 @@ def ensure_target_policy(text: str) -> str:
     raise ValueError("pacman.conf has no [options] section")
 
 
-def make_builder_only_config(text: str) -> str:
+def make_builder_only_config(text: str, cache_dir: str | None = None) -> str:
     """Return an isolated PRoot config; its relaxed sandboxes never enter image."""
+    if cache_dir is not None and (
+        not cache_dir.startswith("/")
+        or any(character.isspace() for character in cache_dir)
+        or "#" in cache_dir
+    ):
+        raise ValueError("builder cache directory must be an absolute path without whitespace or '#'")
     lines = text.splitlines(keepends=True)
     result: list[str] = []
     in_options = False
@@ -93,13 +99,17 @@ def make_builder_only_config(text: str) -> str:
                         SYSCALL_DIRECTIVE + newline,
                     )
                 )
+                if cache_dir is not None:
+                    result.append(f"CacheDir = {cache_dir}{newline}")
                 inserted = True
             continue
         if in_options:
             stripped = line.lstrip()
             candidate = stripped.removeprefix("#").strip()
             key = candidate.split("=", 1)[0].strip().split()[0] if candidate else ""
-            if key in {"DownloadUser", FILESYSTEM_DIRECTIVE, SYSCALL_DIRECTIVE}:
+            if key in {"DownloadUser", FILESYSTEM_DIRECTIVE, SYSCALL_DIRECTIVE} or (
+                cache_dir is not None and key == "CacheDir"
+            ):
                 continue
         result.append(line)
     if not options_found or not inserted:
@@ -144,13 +154,13 @@ def configure_file(path: Path, *, check_only: bool = False) -> bool:
     return True
 
 
-def write_builder_config(source: Path, output: Path) -> None:
+def write_builder_config(source: Path, output: Path, cache_dir: str | None = None) -> None:
     if source.is_symlink() or not source.is_file():
         raise ValueError(f"expected a regular, non-symlink pacman.conf: {source}")
     if output.exists() or output.is_symlink():
         raise ValueError(f"builder config output already exists: {output}")
     output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    rendered = make_builder_only_config(source.read_text(encoding="utf-8"))
+    rendered = make_builder_only_config(source.read_text(encoding="utf-8"), cache_dir)
     try:
         with output.open("x", encoding="utf-8", newline="") as stream:
             stream.write(rendered)
@@ -171,14 +181,20 @@ def main() -> int:
         type=Path,
         help="write an isolated PRoot-only config with both sandbox workarounds enabled",
     )
+    parser.add_argument(
+        "--cache-dir",
+        help="builder-only pacman package cache directory (requires --builder-config)",
+    )
     args = parser.parse_args()
     try:
         if args.builder_config is not None:
             if args.check:
                 parser.error("--builder-config and --check are mutually exclusive")
-            write_builder_config(args.pacman_conf, args.builder_config)
+            write_builder_config(args.pacman_conf, args.builder_config, args.cache_dir)
             print("Created isolated builder-only pacman config; target pacman.conf was not edited.")
             return 0
+        if args.cache_dir is not None:
+            parser.error("--cache-dir requires --builder-config")
         changed = configure_file(args.pacman_conf, check_only=args.check)
     except (OSError, UnicodeError, ValueError) as error:
         parser.exit(1, f"pacman sandbox policy: ERROR: {error}\n")

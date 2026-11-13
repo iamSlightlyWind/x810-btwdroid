@@ -196,9 +196,15 @@ chmod 0644 "$rootfs/etc/windstation-arch-profile"
 # Scrub all release-private state using PRoot's fake-root view of the target.
 "$script_dir/scrub-rootfs-private-state.sh"
 
-# The installer image is not a package cache. Drop downloaded package archives
-# and sync databases after the final transaction; the installed pacman DB stays.
-printf 'y\ny\n' | "$script_dir/pacman-target.sh" --builder-mode -Scc
+# Remove only build-time package archives and sync databases from the staged
+# image.  CI may keep the verified package archives in an external Actions
+# cache; pacman -Scc would erase that reusable cache as well.  -Sc removes
+# only obsolete versions from that external cache, retaining archives for the
+# currently installed packages for reuse by the next rolling-repository build.
+if [[ -n "${X810_PACMAN_CACHE_DIR:-}" ]]; then
+    "$script_dir/pacman-target.sh" --builder-mode -Sc --noconfirm
+fi
+"$script_dir/clean-rootfs-cache.sh"
 
 "$script_dir/audit-rootfs.sh"
 

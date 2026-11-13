@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -86,6 +89,21 @@ class TargetPacmanPolicyTests(unittest.TestCase):
         self.assertEqual(source.count("DisableSandboxSyscalls"), 1)
         self.assertIn("#DisableSandboxSyscalls", source)
 
+    def test_external_package_cache_is_builder_only_and_replaces_default_cache_dirs(self):
+        source = (
+            "[options]\nCacheDir = /var/cache/pacman/pkg/\n"
+            "#CacheDir = /other/cache\nDisableSandboxFilesystem\n"
+            "[core]\nServer = example\n"
+        )
+        builder = policy.make_builder_only_config(source, "/work/pacman-cache")
+        self.assertEqual(builder.count("CacheDir = "), 1)
+        self.assertIn("CacheDir = /work/pacman-cache\n", builder)
+        self.assertNotIn("/var/cache/pacman/pkg", builder)
+        self.assertNotIn("/other/cache", builder)
+        self.assertIn("Server = example", builder)
+        with self.assertRaisesRegex(ValueError, "absolute path"):
+            policy.make_builder_only_config(source, "relative/cache")
+
     def test_rejects_disabling_syscall_sandbox(self):
         source = "[options]\nDisableSandboxSyscalls\n"
         with self.assertRaisesRegex(ValueError, "syscall sandbox"):
@@ -125,6 +143,53 @@ class TargetPacmanPolicyTests(unittest.TestCase):
             self.assertEqual(source.read_text(), original)
             self.assertEqual(output.stat().st_mode & 0o777, 0o600)
             self.assertEqual(policy.sandbox_state(output.read_text()), (True, True))
+
+    def test_builder_config_can_write_external_cache_without_mutating_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "target.conf"
+            output = root / "builder" / "pacman.conf"
+            original = "[options]\nCacheDir = /var/cache/pacman/pkg/\nDisableSandboxFilesystem\n"
+            source.write_text(original)
+            policy.write_builder_config(source, output, "/work/pacman-cache")
+            self.assertEqual(source.read_text(), original)
+            self.assertIn("CacheDir = /work/pacman-cache\n", output.read_text())
+
+    def test_builder_image_uses_external_pacman_cache_when_configured(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "project"
+            tools_dir = project / "tools"
+            (tools_dir / "builder").mkdir(parents=True)
+            shutil.copy2(Path(__file__).with_name("build-builder-image.sh"), tools_dir)
+            shutil.copy2(Path(__file__).parent / "builder/Containerfile", tools_dir / "builder")
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            podman = fake_bin / "podman"
+            podman.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$@\" > \"$CAPTURE_ARGS\"\n",
+                encoding="utf-8",
+            )
+            podman.chmod(0o755)
+            cache = root / "builder-cache"
+            capture = root / "args"
+            env = os.environ.copy()
+            env.update({
+                "PATH": f"{fake_bin}:{env.get('PATH', '')}",
+                "X810_BUILDER_PACMAN_CACHE_DIR": str(cache),
+                "PODMAN_ROOT_OVERRIDE": str(root / "podman-root"),
+                "PODMAN_RUNROOT_OVERRIDE": str(root / "podman-run"),
+                "CAPTURE_ARGS": str(capture),
+            })
+            result = subprocess.run(
+                [str(tools_dir / "build-builder-image.sh")], check=False, env=env,
+                text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            args = capture.read_text(encoding="utf-8").splitlines()
+            self.assertIn(f"{cache}:/var/cache/pacman/pkg:rw,z", args)
+            self.assertIn("X810_EXTERNAL_PACMAN_CACHE=1", args)
 
     def test_refuses_symlinked_or_missing_config(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -3,7 +3,6 @@ set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 project_dir="$(cd -- "$script_dir/.." && pwd)"
-workspace_dir="$(cd -- "$project_dir/.." && pwd)"
 podman_root="${PODMAN_ROOT_OVERRIDE:-$project_dir/tmp/podman-root}"
 podman_runroot="${PODMAN_RUNROOT_OVERRIDE:-$project_dir/tmp/podman-run}"
 image="localhost/windstation-arch-builder:2026-11-11"
@@ -11,13 +10,13 @@ image="localhost/windstation-arch-builder:2026-11-11"
 mkdir -p "$podman_root" "$podman_runroot"
 podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
   run --rm --security-opt label=disable \
-  --volume "$workspace_dir:/workspace:rw" --workdir /workspace \
+  --volume "$project_dir:/project:rw" --workdir /project \
   "$image" -lc '
     set -euo pipefail
     python3 - <<"PY"
 from pathlib import Path
 
-rootfs = Path("/workspace/x810-btwdroid/work/rootfs")
+rootfs = Path("/project/work/rootfs")
 targets = [rootfs / "var/cache/pacman/pkg", rootfs / "var/lib/pacman/sync"]
 for target in targets:
     if not target.is_dir() or target.is_symlink():

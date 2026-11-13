@@ -63,6 +63,17 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn("BUILD_RUN_ID", update)
         self.assertIn("write-arch-port-build-info.py", update)
         self.assertNotIn("name: x810-arch-packages", update)
+        for marker in (
+            "actions/cache/restore@",
+            "actions/cache/save@",
+            "x810-arch-builder-pacman-port-",
+            "x810-makepkg-port-",
+            "Finalize Arch builder and makepkg caches",
+        ):
+            self.assertIn(marker, update)
+        self.assertLess(update.index("Restore Arch builder package cache"), update.index("Build the Arch support packages"))
+        self.assertLess(update.index("Restore makepkg source cache"), update.index("Build the Arch support packages"))
+        self.assertLess(update.index("Finalize Arch builder and makepkg caches"), update.index("Build the Tab Companion updater bundle"))
 
     def test_rootfs_is_independent_of_the_port_update_job(self):
         resolve = self.text.split("  resolve_rootfs:\n", 1)[1].split("  build_rootfs:\n", 1)[0]
@@ -77,6 +88,21 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn("Stage publication identity for the rootfs package build", build)
         self.assertIn("write-arch-port-build-info.py", build)
         self.assertIn("needs.plan.outputs.publication_run_id", build)
+        for marker in (
+            "actions/cache/restore@",
+            "actions/cache/save@",
+            "x810-alarm-bootstrap-",
+            "x810-arch-builder-pacman-rootfs-",
+            "x810-arch-rootfs-pacman-",
+            "x810-makepkg-rootfs-",
+            "X810_BUILDER_PACMAN_CACHE_DIR",
+            "X810_PACMAN_CACHE_DIR",
+            "Finalize Arch rootfs caches after build attempt",
+        ):
+            self.assertIn(marker, build)
+        self.assertLess(build.index("Restore pinned Arch Linux ARM bootstrap"), build.index("Build and audit the complete Arch GNOME rootfs"))
+        self.assertLess(build.index("Restore rolling rootfs package cache"), build.index("Build and audit the complete Arch GNOME rootfs"))
+        self.assertLess(build.index("Finalize Arch rootfs caches after build attempt"), build.index("Hand the rootfs release set"))
         rootfs_builder = (ROOT / "rootfs/build-rootfs.sh").read_text(encoding="utf-8")
         self.assertIn('"$tools/build-packages.sh"', rootfs_builder)
 

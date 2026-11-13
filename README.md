@@ -41,6 +41,13 @@ contains both rootfs and Tab Companion update assets, and older Arch releases
 are pruned only after the aggregate is verified. The build does not access
 Windstation. See [docs/INSTALL.md](docs/INSTALL.md) for local tests.
 
+GitHub Actions restores/saves the signed bootstrap, Arch builder package
+archives, makepkg source downloads, and rolling target-rootfs package archives.
+The target pacman cache is mounted outside `work/rootfs`; each build still runs
+a full `-Syu` against current signed repositories, and only cached packages
+matching installed versions are retained for reuse. Rootfs and sync-database
+caches are removed before release, so no cache is shipped in the image.
+
 The image includes GNOME Settings, GNOME Terminal, Brave, Bluetooth, and Tab
 Companion. No build-time user, SSH key, Wi-Fi credentials, or Tailscale state
 is part of the public rootfs.
