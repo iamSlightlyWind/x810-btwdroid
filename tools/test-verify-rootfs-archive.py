@@ -213,7 +213,7 @@ class ArchiveFixture:
                     continue
                 dbdir = f"var/lib/pacman/local/{package}-1.0-1"
                 self.add_dir(archive, dbdir, mode=0o755)
-                package_version = "0.1.1-1" if package == "x810-device-support" else "1.0-1"
+                package_version = "0.1.1-2" if package == "x810-device-support" else "1.0-1"
                 self.add_file(archive, f"{dbdir}/desc", f"%NAME%\n{package}\n\n%VERSION%\n{package_version}\n".encode())
             if self.optional_app:
                 dbdir = f"var/lib/pacman/local/{self.optional_app}-1.0-1"
@@ -269,9 +269,9 @@ class VerifyRootfsArchiveIntegrationTests(unittest.TestCase):
         self.assertIn("does not match expected run_id", result.stderr)
 
     def test_release_publisher_requires_rootfs_support_package_to_match_update(self):
-        result = self.run_verifier(ArchiveFixture(), "--expected-support-package-version", "0.1.1-1")
+        result = self.run_verifier(ArchiveFixture(), "--expected-support-package-version", "0.1.1-2")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        mismatch = self.run_verifier(ArchiveFixture(), "--expected-support-package-version", "0.1.1-2")
+        mismatch = self.run_verifier(ArchiveFixture(), "--expected-support-package-version", "0.1.1-3")
         self.assertNotEqual(mismatch.returncode, 0)
         self.assertIn("does not match update.zip", mismatch.stderr)
 

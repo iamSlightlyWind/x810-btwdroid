@@ -1,19 +1,29 @@
 # SPDX-License-Identifier: MIT
 
-post_install() {
-  cat <<'NOTICE'
-x810-device-support installed. It does not enable or start services during
-package installation. The image profile explicitly enables the validated
-thermal limiter, GNOME device controls, power-profile API, charge-limit restore,
-Bluetooth address provisioner, and delayed X810 SSC sensor initialization.
-Android's vendor, firmware, DSP, and persist partitions are mounted read-only;
-only the tablet-local APNHLOS firmware is staged into the Arch root filesystem.
-NOTICE
+enable_sensor_units() {
+  systemctl --root=/ enable \
+    gts9wifi-android-parts.service vendor.mount vendor-firmware_mnt.mount \
+    vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer \
+    || return 1
+}
+
+prepare_sensor_account() {
   if command -v systemd-sysusers >/dev/null 2>&1; then
     systemd-sysusers /usr/lib/sysusers.d/hexagonrpcd.conf || return 1
   fi
 }
 
+post_install() {
+  cat <<'NOTICE'
+x810-device-support installed. The delayed X810 SSC sensor timer and the
+read-only Android vendor/firmware/DSP/persist mounts are enabled. The sensor
+stack starts asynchronously after GDM; stock APNHLOS firmware is only staged
+into the Arch root filesystem. Other device services retain image-profile
+enablement policy.
+NOTICE
+  prepare_sensor_account && enable_sensor_units
+}
+
 post_upgrade() {
-  :
+  prepare_sensor_account && enable_sensor_units
 }

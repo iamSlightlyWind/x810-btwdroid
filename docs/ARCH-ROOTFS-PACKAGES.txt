@@ -555,7 +555,7 @@ woff2 1.0.2-7
 wpa_supplicant 2:2.12-1
 x264 3:0.165.r3222.b35605a-2
 x265 4.3-1
-x810-device-support 0.1.1-1
+x810-device-support 0.1.1-2
 xcb-proto 1.17.0-4
 xcb-util 0.4.1-2
 xdg-dbus-proxy 0.1.9-1

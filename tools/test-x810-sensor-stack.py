@@ -91,6 +91,13 @@ class SensorStackTests(unittest.TestCase):
         self.assertNotIn('enable hexagonrpcd-adsp-sensorspd.service', profile)
         self.assertIn("Android persist must be mounted read-only", profile)
 
+    def test_package_upgrade_enables_sensor_units_for_existing_installs(self):
+        hook = (ROOT / "packages/x810-device-support/x810-device-support.install").read_text(encoding="utf-8")
+        self.assertIn("post_upgrade()", hook)
+        self.assertIn("systemctl --root=/ enable", hook)
+        self.assertIn("gts9wifi-wait-sensor-proxy.timer", hook)
+        self.assertNotIn("--now", hook)
+
 
 if __name__ == "__main__":
     unittest.main()

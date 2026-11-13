@@ -37,7 +37,7 @@ class ArchPortReleaseTests(unittest.TestCase):
     def make_package(self, path: Path, *, pkgname="x810-device-support") -> None:
         with tempfile.TemporaryDirectory() as temporary:
             tar_path = Path(temporary) / "package.tar"
-            pkginfo = f"pkgname = {pkgname}\npkgver = 0.1.1-1\narch = aarch64\n".encode()
+            pkginfo = f"pkgname = {pkgname}\npkgver = 0.1.1-2\narch = aarch64\n".encode()
             with tarfile.open(tar_path, "w") as archive:
                 for name, content in (
                     (".PKGINFO", pkginfo),
@@ -59,7 +59,7 @@ class ArchPortReleaseTests(unittest.TestCase):
             info_path, version="0.1.1", run_id=run_id, run_number=run_number,
             commit=commit, branch=branch,
         )
-        package = root / "x810-device-support-0.1.1-1-aarch64.pkg.tar.zst"
+        package = root / "x810-device-support-0.1.1-2-aarch64.pkg.tar.zst"
         self.make_package(package)
         output = root / "update.zip"
         bundle.create_bundle(package, info_path, output)
