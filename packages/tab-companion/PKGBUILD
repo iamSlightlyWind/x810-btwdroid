@@ -2,7 +2,7 @@
 # Windstation image package wrapper around Tab Companion's existing Arch source.
 pkgname=tab-companion
 pkgver=1.4.2
-pkgrel=5
+pkgrel=6
 pkgdesc='Samsung Galaxy tablet S Pen, keyboard and hardware companion'
 arch=('any')
 url='https://github.com/iamSlightlyWind/tab-companion'

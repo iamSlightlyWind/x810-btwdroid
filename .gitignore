@@ -41,6 +41,7 @@
 **/tailscaled.state
 **/NetworkManager/system-connections/**
 **/wpa_supplicant.conf
+!packages/x810-device-support/files/usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf
 **/*.pem
 **/*.key
 **/*.p12

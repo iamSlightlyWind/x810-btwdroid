@@ -74,6 +74,27 @@ class RootfsImageProfileTests(unittest.TestCase):
         self.assertIn("Arch port.json was not installed from x810-device-support", profile)
         self.assertIn('audit_check "Arch Tab Companion port metadata is present"', audit)
         self.assertIn('audit_check "dualboot extension metadata is present"', audit)
+        self.assertIn('usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf', profile)
+        self.assertIn('etc/environment.d/91-x810-gtk-rendering.conf', profile)
+        self.assertIn('etc/systemd/system.conf.d/90-x810-boot-logs.conf', profile)
+        self.assertIn('GSK_GPU_DISABLE=merge', profile)
+        self.assertIn('ShowStatus=yes', profile)
+        self.assertIn('wpa_supplicant D-Bus policy is installed', audit)
+        self.assertIn('GTK merge artifact workaround is installed', audit)
+        self.assertIn('systemd boot progress is enabled', audit)
+        for unit in (
+            "tuned.service",
+            "tuned-ppd.service",
+            "x810-thermal-limit.service",
+            "gts9wifi-device-control.service",
+            "gts9wifi-bt-provision.service",
+            "x810-charge-limit.service",
+        ):
+            self.assertIn(unit, profile)
+            self.assertIn(unit, audit)
+        for helper in ("gts9wifi-bt-provision", "gts9wifi-device-control", "x810-charge-limit"):
+            self.assertIn(helper, profile)
+        self.assertIn("gnome-gts9wifi@tabs9linux/extension.js", profile)
         self.assertIn('audit_fail "$label"', audit)
 
     def test_installer_fetches_a_public_release_and_supports_offline_cache(self):
@@ -115,6 +136,8 @@ class RootfsImageProfileTests(unittest.TestCase):
                 "brave-bin",
                 "bluez",
                 "bluez-utils",
+                "tuned-ppd",
+                "dtc",
                 "pipewire-jack",
                 "noto-fonts",
                 "tab-companion",

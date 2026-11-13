@@ -3,8 +3,9 @@
 post_install() {
   cat <<'NOTICE'
 x810-device-support installed. It does not enable or start services during
-package installation. Keep x810-thermal-limit.service disabled until its
-policy has been validated on the target device.
+package installation. The image profile explicitly enables the validated
+thermal limiter, GNOME device controls, power-profile API, charge-limit restore,
+and Bluetooth address provisioner; manual recovery remains opt-in.
 NOTICE
 }
 

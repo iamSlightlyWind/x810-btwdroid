@@ -9,6 +9,15 @@ OVERLAY = ROOT / "packages/tab-companion/overlay"
 
 
 class BrowserOverlayTests(unittest.TestCase):
+    def test_arch_window_overlay_imports_shared_legacy_update_api(self):
+        overlay_window = (OVERLAY / "usr/lib/tab-companion/tab_companion/window.py").read_text()
+        source_window = (ROOT.parent / "tab-companion/src/tab_companion/window.py").read_text()
+        source_updates = (ROOT.parent / "tab-companion/src/tab_companion/updates_page.py").read_text()
+        self.assertIn("legacy_update_available", overlay_window)
+        self.assertNotIn("legacy_ubuntu_update_available", overlay_window)
+        self.assertIn("legacy_update_available", source_window)
+        self.assertIn("def legacy_update_available(", source_updates)
+
     def test_browser_selector_and_limits_are_in_arch_package_overlay(self):
         memory = (OVERLAY / "usr/lib/tab-companion/tab_companion/browser_memory.py").read_text()
         page = (OVERLAY / "usr/lib/tab-companion/tab_companion/power_profiles_page.py").read_text()

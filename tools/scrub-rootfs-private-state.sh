@@ -31,7 +31,9 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     find_sensitive() {
       target /usr/bin/find "${scan_roots[@]}" \
         \( -iname ".ssh*" -o -iname "authorized_keys" \
-          -o -iname "*ssh_host_*" -o -iname "wpa_supplicant.conf" \) "$@"
+          -o -iname "*ssh_host_*" \
+          -o \( -iname "wpa_supplicant.conf" \
+            ! -path "/usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf" \) \) "$@"
     }
 
     # The profile package transaction runs after SSH configuration and can

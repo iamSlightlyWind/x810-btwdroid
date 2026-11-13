@@ -29,6 +29,8 @@ PACKAGES = (
     "brave-bin",
     "bluez",
     "bluez-utils",
+    "tuned-ppd",
+    "dtc",
     "pipewire-jack",
     "noto-fonts",
     "tab-companion",
@@ -163,6 +165,12 @@ class ArchiveFixture:
             self.add_file(archive, "usr/lib/systemd/system/bluetooth.service", b"[Service]\nExecStart=/usr/lib/bluetooth/bluetoothd\n")
             self.add_file(archive, "usr/bin/bluetoothctl", b"#!/bin/sh\n", mode=0o755)
             self.add_file(archive, "etc/bluetooth/main.conf", b"[Policy]\nAutoEnable=true\n")
+            self.add_file(archive, "usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf",
+                          b'<busconfig><policy user="root"><allow own="fi.w1.wpa_supplicant1"/></policy></busconfig>\n')
+            self.add_file(archive, "etc/environment.d/91-x810-gtk-rendering.conf",
+                          b"GSK_GPU_DISABLE=merge\n")
+            self.add_file(archive, "etc/systemd/system.conf.d/90-x810-boot-logs.conf",
+                          b"[Manager]\nShowStatus=yes\n")
             self.add_file(
                 archive,
                 "usr/local/libexec/x810-boot-switch-core",

@@ -24,7 +24,7 @@ REQUIRED_PROFILE_PACKAGES = {
     "x810-device-support", "zram-generator", "networkmanager", "wpa_supplicant",
     "openssh", "sudo", "gdm", "gnome-shell", "gnome-session",
     "gnome-control-center", "gnome-terminal", "brave-bin", "bluez",
-    "bluez-utils", "pipewire-jack", "noto-fonts", "tab-companion",
+    "bluez-utils", "tuned-ppd", "dtc", "pipewire-jack", "noto-fonts", "tab-companion",
 }
 FORBIDDEN_OPTIONAL_DESKTOP_PACKAGES = {"gnome-console", "gnome-boxes", "gnome-books"}
 REQUIRED_SYMLINK_TARGETS = {
@@ -44,6 +44,9 @@ EXPECTED_FILES: dict[str, tuple[int, int, int | None]] = {
     "usr/lib/systemd/system/graphical.target": (0, 0, None),
     "usr/bin/bluetoothctl": (0, 0, 0o755),
     "etc/bluetooth/main.conf": (0, 0, None),
+    "usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf": (0, 0, 0o644),
+    "etc/environment.d/91-x810-gtk-rendering.conf": (0, 0, 0o644),
+    "etc/systemd/system.conf.d/90-x810-boot-logs.conf": (0, 0, 0o644),
     "usr/local/libexec/x810-boot-switch-core": (0, 0, 0o755),
     "usr/local/libexec/tab-companion-boot-status": (0, 0, 0o755),
     "usr/local/libexec/tab-companion-boot-switch": (0, 0, 0o755),
@@ -211,7 +214,8 @@ def verify_archive(path: pathlib.Path,
                     raise ValueError("public rootfs contains SSH credential material")
                 if lower.startswith("var/lib/tailscale/"):
                     raise ValueError("public rootfs contains Tailscale state")
-                if lower.endswith("/wpa_supplicant.conf"):
+                if (lower.endswith("/wpa_supplicant.conf")
+                        and normalized != "usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf"):
                     raise ValueError("public rootfs contains saved Wi-Fi credentials")
                 if (lower.startswith("etc/NetworkManager/system-connections/")
                         and member.isfile()):
@@ -242,6 +246,9 @@ def verify_archive(path: pathlib.Path,
                     "etc/pacman.conf", "etc/shadow", "etc/passwd", "etc/os-release",
                     "usr/lib/os-release",
                     "etc/bluetooth/main.conf", "etc/sudoers.d/40-windstation",
+                    "usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf",
+                    "etc/environment.d/91-x810-gtk-rendering.conf",
+                    "etc/systemd/system.conf.d/90-x810-boot-logs.conf",
                     "etc/ssh/sshd_config.d/90-windstation.conf",
                     "usr/lib/systemd/system/graphical.target",
                     "usr/local/libexec/x810-boot-switch-core",
@@ -318,6 +325,15 @@ def verify_archive(path: pathlib.Path,
             raise ValueError("graphical.target does not want display-manager.service")
         if not re.search(rb"(?m)^\s*AutoEnable\s*=\s*true\s*$", captured["etc/bluetooth/main.conf"], re.I):
             raise ValueError("BlueZ AutoEnable=true is missing")
+        if b'<allow own="fi.w1.wpa_supplicant1"/>' not in captured[
+                "usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf"]:
+            raise ValueError("wpa_supplicant D-Bus service ownership policy is missing")
+        if not re.search(rb"(?m)^GSK_GPU_DISABLE=merge$", captured[
+                "etc/environment.d/91-x810-gtk-rendering.conf"]):
+            raise ValueError("X810 GTK rendering workaround is missing")
+        boot_policy = captured["etc/systemd/system.conf.d/90-x810-boot-logs.conf"]
+        if not re.search(rb"(?m)^ShowStatus=yes$", boot_policy):
+            raise ValueError("systemd boot status output is not enabled")
         if b"PasswordAuthentication yes" not in captured["etc/ssh/sshd_config.d/90-windstation.conf"]:
             raise ValueError("password-based SSH is not enabled for the install-provisioned account")
         if b"PermitRootLogin no" not in captured["etc/ssh/sshd_config.d/90-windstation.conf"]:

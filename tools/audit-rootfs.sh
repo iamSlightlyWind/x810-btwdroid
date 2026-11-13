@@ -48,7 +48,9 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
       local found
       found="$(target_tree /usr/bin/find "${scan_roots[@]}" \
         \( -iname ".ssh*" -o -iname "authorized_keys" \
-          -o -iname "*ssh_host_*" -o -iname "wpa_supplicant.conf" \) -print -quit)"
+          -o -iname "*ssh_host_*" \
+          -o \( -iname "wpa_supplicant.conf" \
+            ! -path "/usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf" \) \) -print -quit)"
       if [[ -n "$found" ]]; then
         echo "Private SSH or Wi-Fi credential path remains in target rootfs." >&2
         return 1
@@ -83,7 +85,7 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     audit_check "optional GNOME applications are absent" no_optional_apps
     audit_check "GNOME, browser, Bluetooth, and Tab Companion packages are installed" \
       target /usr/bin/pacman -Q gdm gnome-shell gnome-session gnome-control-center \
-      gnome-terminal brave-bin bluez bluez-utils pipewire-jack noto-fonts tab-companion
+      gnome-terminal brave-bin bluez bluez-utils tuned-ppd dtc pipewire-jack noto-fonts tab-companion
     if target /usr/bin/pacman -Q linux-aarch64 >/dev/null 2>&1; then
       audit_fail "generic linux-aarch64 kernel package must not be installed"
     fi
@@ -92,9 +94,24 @@ podman --root "$podman_root" --runroot "$podman_runroot" --storage-driver=vfs \
     audit_check "GDM is enabled" test "$(systemctl --root="$rootfs" is-enabled gdm.service)" = enabled
     audit_check "graphical.target is the default" test "$(systemctl --root="$rootfs" get-default)" = graphical.target
     audit_check "Bluetooth service is enabled" test "$(systemctl --root="$rootfs" is-enabled bluetooth.service)" = enabled
+    for unit in tuned.service tuned-ppd.service x810-thermal-limit.service gts9wifi-device-control.service \
+      gts9wifi-bt-provision.service x810-charge-limit.service; do
+      audit_check "X810 feature unit is enabled: $unit" test "$(systemctl --root="$rootfs" is-enabled "$unit")" = enabled
+    done
+    for helper in gts9wifi-bt-provision gts9wifi-bt-revive gts9wifi-device-control x810-charge-limit; do
+      audit_check "X810 feature helper is present: $helper" test -x "$rootfs/usr/libexec/$helper"
+    done
+    audit_check "GNOME device-controls extension is present" \
+      test -f "$rootfs/usr/share/gnome-shell/extensions/gnome-gts9wifi@tabs9linux/extension.js"
     audit_check "display-manager.service points to GDM" test -L "$rootfs/etc/systemd/system/display-manager.service"
     audit_check "default.target symlink exists" test -L "$rootfs/etc/systemd/system/default.target"
     audit_check "BlueZ auto-enable is configured" grep -qx AutoEnable=true "$rootfs/etc/bluetooth/main.conf"
+    audit_check "wpa_supplicant D-Bus policy is installed" \
+      test -s "$rootfs/usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf"
+    audit_check "GTK merge artifact workaround is installed" \
+      grep -Fxq GSK_GPU_DISABLE=merge "$rootfs/etc/environment.d/91-x810-gtk-rendering.conf"
+    audit_check "systemd boot progress is enabled" \
+      grep -Fxq ShowStatus=yes "$rootfs/etc/systemd/system.conf.d/90-x810-boot-logs.conf"
     audit_check "target pacman sandbox policy is safe" \
       python3 "$project/tools/configure-target-pacman.py" --check "$rootfs/etc/pacman.conf"
     for helper in x810-boot-switch-core tab-companion-boot-status tab-companion-boot-switch; do
