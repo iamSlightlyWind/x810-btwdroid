@@ -3,8 +3,9 @@
 
 This intentionally mirrors Fedora's guided install safety model while keeping
 the Arch trial narrower: TWRP must already be open, and the sole block-device
-write is formatting the existing PARTLABEL=linuxroot as ext4. It never changes
-GPT, Android userdata, boot images, recovery, vbmeta, or reboots the tablet.
+write is formatting the existing PARTLABEL=linuxroot as ext4. Before formatting,
+it saves the Android boot set to the host and seeds it into the new rootfs. It
+never writes GPT, Android userdata, boot images, recovery, vbmeta, or reboots.
 """
 
 from __future__ import annotations
@@ -57,7 +58,20 @@ LINUXROOT_TYPE_GUID = "0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 LINUXROOT_MIN_BYTES = 32 * 1024**3
 INSTALL_CONFIRMATION = "INSTALL ARCH ON SM-X810 AND ERASE LINUXROOT"
 FORMAT_CONFIRMATION = "FORMAT ONLY LINUXROOT ON SM-X810"
+ANDROID_BOOT_CONFIRMATION = "I CONFIRM THE CURRENT BOOT PARTITIONS ARE ANDROID"
 INSTALL_MOUNT = "/tmp/x810-arch-linuxroot"
+BOOT_IMAGE_SIZES = {
+    "boot": 100_663_296,
+    "init_boot": 8_388_608,
+    "vendor_boot": 100_663_296,
+    "dtbo": 16_777_216,
+}
+BOOT_PARTITION_NODES = {
+    "boot": "/dev/block/sda21",
+    "init_boot": "/dev/block/sda22",
+    "vendor_boot": "/dev/block/sda24",
+    "dtbo": "/dev/block/sda30",
+}
 
 
 @dataclass
@@ -397,7 +411,7 @@ def revalidate_partition_before_format(client: ADBClient, expected: dict[str, An
 
 
 def preflight_twrp_tools(client: ADBClient) -> list[Check]:
-    required = ("sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot")
+    required = ("sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot", "dd")
     checks = []
     for tool in required:
         # Quote the complete command string: adb shell concatenates arguments
@@ -471,7 +485,7 @@ def write_gpt_backup(client: ADBClient, project: Path, identity: dict[str, str],
             "rootfs_sha256": bundle.sha256,
             "linuxroot": {key: value for key, value in partition.items() if key != "gpt"},
             "gpt_metadata_sha256": sha256_file(local_gpt),
-            "scope": "GPT metadata only; not a partition-data or userdata backup",
+            "scope": "GPT metadata only; Android boot images are tracked separately; no other partition-data or userdata backup",
         }
         (backup / "manifest.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         for path in backup.iterdir():
@@ -486,6 +500,194 @@ def write_gpt_backup(client: ADBClient, project: Path, identity: dict[str, str],
     finally:
         # This unlinks a file in recovery's RAM tmpfs; it does not touch a block partition.
         client.shell("rm", "-f", remote)
+
+
+def _write_private_image(path: Path, data: bytes, expected_size: int, description: str) -> str:
+    if len(data) != expected_size:
+        raise RuntimeError(f"{description}: expected {expected_size:,} bytes, got {len(data):,}")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with path.open("xb") as stream:
+        stream.write(data)
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.chmod(path, 0o600)
+    return sha256_file(path)
+
+
+def _verify_boot_partition_geometry(client: ADBClient) -> None:
+    for name, expected_size in BOOT_IMAGE_SIZES.items():
+        partition = f"/dev/block/by-name/{name}"
+        resolved = client.shell("readlink", "-f", partition)
+        if resolved.returncode != 0 or resolved.stdout.strip() != BOOT_PARTITION_NODES[name]:
+            raise RuntimeError(
+                f"refusing to read {name}: {partition} resolves to "
+                f"{resolved.stdout.strip() or 'unknown'}, expected {BOOT_PARTITION_NODES[name]}"
+            )
+        size = client.shell("blockdev", "--getsize64", partition)
+        if size.returncode != 0 or size.stdout.strip() != str(expected_size):
+            raise RuntimeError(
+                f"refusing to read {name}: expected {expected_size:,} bytes, "
+                f"got {size.stdout.strip() or 'unknown'}"
+            )
+
+
+def _read_android_set_from_existing_rootfs(client: ADBClient, backup: Path) -> dict[str, Path] | None:
+    """Copy a previously staged Android boot set from linuxroot without replaying its journal.
+
+    None means every Android image is absent. A partial set, symlink, wrong-size
+    image, or inability to make a read-only mount is an error: formatting in
+    those states could destroy the only recoverable Android copy.
+    """
+    mountpoint = f"/tmp/x810-arch-source-{uuid.uuid4().hex}"
+    created = client.shell("mkdir", "-p", mountpoint)
+    if created.returncode != 0:
+        raise RuntimeError(f"could not create old-linuxroot read-only mountpoint: {output(created)}")
+    mounted = client.shell("mount", "-t", "ext4", "-o", "ro,noload", LINUXROOT, mountpoint, timeout=60)
+    if mounted.returncode != 0:
+        client.shell("rm", "-rf", mountpoint)
+        raise RuntimeError(
+            "could not mount existing linuxroot read-only to preserve its Android boot set; "
+            f"refusing to format: {output(mounted)}"
+        )
+    try:
+        mounts = client.shell("cat", "/proc/mounts")
+        verified_mount = False
+        if mounts.returncode == 0:
+            for line in mounts.stdout.splitlines():
+                fields = line.split()
+                if len(fields) >= 4 and fields[1] == mountpoint and fields[2] == "ext4":
+                    options = set(fields[3].split(","))
+                    verified_mount = {"ro", "noload"}.issubset(options)
+                    break
+        if not verified_mount:
+            raise RuntimeError("old linuxroot mount is not verified ext4 ro,noload; refusing to inspect or format")
+
+        android_dir = f"{mountpoint}/var/lib/x810-boot-sets/android"
+        directory_exists = client.shell("test", "-d", android_dir).returncode == 0
+        directory_is_symlink = client.shell("test", "-L", android_dir).returncode == 0
+        if directory_is_symlink:
+            raise RuntimeError("existing Android boot-set directory is a symlink; refusing to format linuxroot")
+        states: dict[str, tuple[bool, bool]] = {}
+        for name in BOOT_IMAGE_SIZES:
+            path = f"{android_dir}/{name}.img"
+            regular = client.shell("test", "-f", path).returncode == 0
+            symlink = client.shell("test", "-L", path).returncode == 0
+            states[name] = regular, symlink
+
+        if all(not regular and not symlink for regular, symlink in states.values()):
+            if directory_exists:
+                raise RuntimeError(
+                    "existing Android boot-set directory is incomplete; refusing to erase linuxroot"
+                )
+            return None
+        if any(symlink for _, symlink in states.values()) or not all(regular for regular, _ in states.values()):
+            raise RuntimeError(
+                "existing linuxroot has a partial or symlinked Android boot set; "
+                "refusing to erase linuxroot"
+            )
+
+        destination = backup / "boot" / "android"
+        destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+        images: dict[str, Path] = {}
+        records: dict[str, dict[str, Any]] = {}
+        for name, expected_size in BOOT_IMAGE_SIZES.items():
+            remote = f"{android_dir}/{name}.img"
+            canonical = client.shell("readlink", "-f", remote)
+            expected_path = f"{android_dir}/{name}.img"
+            if canonical.returncode != 0 or canonical.stdout.strip() != expected_path:
+                raise RuntimeError(f"existing Android {name} image is not a regular file in the expected directory")
+            local = destination / f"{name}.img"
+            pulled = client.pull(remote, local, timeout=600)
+            if pulled.returncode != 0 or not local.is_file():
+                raise RuntimeError(f"could not save existing Android {name} image to the host: {output(pulled)}")
+            if local.stat().st_size != expected_size:
+                raise RuntimeError(
+                    f"existing Android {name} image has {local.stat().st_size:,} bytes, "
+                    f"expected {expected_size:,}; refusing to format linuxroot"
+                )
+            os.chmod(local, 0o600)
+            images[name] = local
+            records[name] = {
+                "file": str(local.relative_to(backup)),
+                "size_bytes": expected_size,
+                "sha256": sha256_file(local),
+            }
+        _write_android_boot_manifest(backup, "existing-linuxroot", records)
+        return images
+    finally:
+        unmounted = client.shell("umount", mountpoint, timeout=60)
+        if unmounted.returncode != 0:
+            raise RuntimeError(f"could not unmount old linuxroot read-only source: {output(unmounted)}")
+        removed = client.shell("rm", "-rf", mountpoint)
+        if removed.returncode != 0:
+            raise RuntimeError(f"could not remove temporary source mountpoint: {output(removed)}")
+
+
+def _write_android_boot_manifest(backup: Path, source: str,
+                                 records: dict[str, dict[str, Any]]) -> None:
+    if set(records) != set(BOOT_IMAGE_SIZES):
+        raise RuntimeError("Android boot backup manifest must contain exactly four approved images")
+    manifest = {
+        "schema_version": 1,
+        "device_model": EXPECTED_MODEL,
+        "source": source,
+        "scope": "Android boot set: boot, init_boot, vendor_boot, and dtbo only",
+        "images": records,
+    }
+    path = backup / "android-boot-backup-manifest.json"
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    os.chmod(path, 0o600)
+    digest = backup / "android-boot-backup-manifest.sha256"
+    digest.write_text(f"{sha256_file(path)}  {path.name}\n", encoding="ascii")
+    os.chmod(digest, 0o600)
+
+
+def save_android_boot_set(client: ADBClient, backup: Path,
+                          input_func: Callable[[str], str]) -> dict[str, Path]:
+    """Preserve Android boot images locally before linuxroot is formatted.
+
+    Prefer the existing staged Android set, since the currently active boot
+    partitions may already contain the Linux kernel. For a first install with
+    no staged set, require an explicit attestation before treating the current
+    boot partitions as Android images.
+    """
+    images = _read_android_set_from_existing_rootfs(client, backup)
+    if images is not None:
+        print("Saved the existing staged Android boot set from linuxroot to the host backup.")
+        return images
+
+    try:
+        entered = input_func(
+            "No staged Android boot set exists in linuxroot. Type exactly "
+            f"`{ANDROID_BOOT_CONFIRMATION}` only if the current four boot partitions are Android: "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        raise RuntimeError("cancelled before boot backup; linuxroot was not formatted")
+    if entered != ANDROID_BOOT_CONFIRMATION:
+        raise RuntimeError(
+            "Android boot-image confirmation did not match; no Android boot backup was made "
+            "and linuxroot must not be formatted"
+        )
+
+    _verify_boot_partition_geometry(client)
+    destination = backup / "boot" / "android"
+    destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+    images = {}
+    records: dict[str, dict[str, Any]] = {}
+    for name, expected_size in BOOT_IMAGE_SIZES.items():
+        partition = f"/dev/block/by-name/{name}"
+        data = client.read_binary(f"dd if={partition} bs=4M 2>/dev/null", timeout=600)
+        local = destination / f"{name}.img"
+        digest = _write_private_image(local, data, expected_size, f"current Android {name} backup")
+        images[name] = local
+        records[name] = {
+            "file": str(local.relative_to(backup)),
+            "size_bytes": expected_size,
+            "sha256": digest,
+        }
+    _write_android_boot_manifest(backup, "confirmed-current-partitions", records)
+    print("Saved all four confirmed Android boot partitions to the host backup.")
+    return images
 
 
 def prompt_install_details(password_reader: Callable[[str], str] = getpass.getpass,
@@ -654,6 +856,49 @@ chroot "$ROOT" /usr/bin/visudo -c
         finally:
             client.shell("rm", "-f", "/tmp/x810-arch-provision.sh", "/tmp/x810-arch-password-hash")
 
+def stage_android_boot_set(client: ADBClient, mountpoint: str,
+                           images: dict[str, Path]) -> None:
+    """Seed and read-back-verify the saved Android boot set in the new rootfs."""
+    if set(images) != set(BOOT_IMAGE_SIZES):
+        raise ValueError("Android boot set must contain exactly boot/init_boot/vendor_boot/dtbo")
+    directory = f"{mountpoint}/var/lib/x810-boot-sets/android"
+    base = f"{mountpoint}/var/lib/x810-boot-sets"
+    for args in (("mkdir", "-p", directory), ("chmod", "0755", base),
+                 ("chmod", "0755", directory)):
+        result = client.shell(*args, timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(f"could not prepare Android boot-set directory: {output(result)}")
+    for name, expected_size in BOOT_IMAGE_SIZES.items():
+        source = Path(images[name])
+        if source.is_symlink() or not source.is_file() or source.stat().st_size != expected_size:
+            raise RuntimeError(f"saved Android {name} image is missing or has the wrong size")
+        expected_hash = sha256_file(source)
+        destination = f"{directory}/{name}.img"
+        pushed = client.push(source, destination, timeout=600)
+        if pushed.returncode != 0:
+            raise RuntimeError(f"could not stage Android {name} image: {output(pushed)}")
+        mode = client.shell("chmod", "0644", destination)
+        if mode.returncode != 0:
+            raise RuntimeError(f"could not set permissions on staged Android {name} image: {output(mode)}")
+        readback = client.read_binary(f"cat {shlex.quote(destination)}", timeout=600)
+        if len(readback) != expected_size or hashlib.sha256(readback).hexdigest() != expected_hash:
+            raise RuntimeError(f"staged Android {name} image failed read-back verification")
+
+    with tempfile.TemporaryDirectory(prefix="x810-android-boot-label-") as temporary:
+        label = Path(temporary) / "name.txt"
+        label.write_text("Android\n", encoding="ascii")
+        os.chmod(label, 0o600)
+        target = f"{directory}/name.txt"
+        pushed = client.push(label, target, timeout=30)
+        if pushed.returncode != 0:
+            raise RuntimeError(f"could not stage Android boot-set label: {output(pushed)}")
+        mode = client.shell("chmod", "0644", target)
+        if mode.returncode != 0:
+            raise RuntimeError(f"could not set permissions on Android boot-set label: {output(mode)}")
+        if client.read_binary(f"cat {shlex.quote(target)}", timeout=30) != b"Android\n":
+            raise RuntimeError("staged Android boot-set label failed read-back verification")
+
+
 def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
     checks = (
         ("test", "-x", f"{mountpoint}/usr/bin/systemctl"),
@@ -674,7 +919,10 @@ def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
         ("test", "-f", f"{mountpoint}/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json"),
         ("test", "-L", f"{mountpoint}/etc/systemd/system/display-manager.service"),
         ("test", "-f", f"{mountpoint}/usr/lib/systemd/system/graphical.target"),
+        ("test", "-f", f"{mountpoint}/var/lib/x810-boot-sets/android/name.txt"),
     )
+    for name in BOOT_IMAGE_SIZES:
+        checks += (("test", "-f", f"{mountpoint}/var/lib/x810-boot-sets/android/{name}.img"),)
     for check in checks:
         result = client.shell(*check)
         if result.returncode != 0:
@@ -705,9 +953,16 @@ def verify_extracted_rootfs(client: ADBClient, mountpoint: str) -> None:
     if os_release.returncode != 0:
         raise RuntimeError("post-extraction check failed: rootfs is not Arch Linux ARM")
 
+    label = client.read_binary(
+        f"cat {shlex.quote(f'{mountpoint}/var/lib/x810-boot-sets/android/name.txt')}", timeout=30
+    )
+    if label != b"Android\n":
+        raise RuntimeError("post-extraction check failed: Android boot-set label is incorrect")
+
 
 def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
-                       account_details: dict[str, str], expected_partition: dict[str, Any]) -> None:
+                       account_details: dict[str, str], expected_partition: dict[str, Any],
+                       android_images: dict[str, Path]) -> None:
     # Re-resolve the PARTLABEL, inspect its exact capacity, ext4 identity,
     # GPT entry, and mount state immediately before the only block write.
     revalidate_partition_before_format(client, expected_partition, bundle.size_bytes)
@@ -727,6 +982,7 @@ def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
             account_details["full_name"], account_details["hostname"],
             account_details["password_hash"],
         )
+        stage_android_boot_set(client, INSTALL_MOUNT, android_images)
         sync = client.shell("sync", timeout=120)
         if sync.returncode != 0:
             raise RuntimeError("sync after rootfs extraction failed")
@@ -751,8 +1007,9 @@ def format_and_install(client: ADBClient, bundle: InstallBundle, backup: Path,
         raise RuntimeError("final sync failed")
     (backup / "INSTALL-COMPLETE.txt").write_text(
         "Arch rootfs installed and read-back checked. Only PARTLABEL=linuxroot was formatted/written. "
-        "No Android partition, GPT, boot image, recovery, vbmeta, userdata, or firmware was modified. "
-        "No reboot was performed.\n",
+        "The four-image Android boot set was saved under boot/android/ and staged with size/SHA-256 "
+        "read-back verification at /var/lib/x810-boot-sets/android/. No Android partition, GPT, "
+        "boot image, recovery, vbmeta, userdata, or firmware was modified. No reboot was performed.\n",
         encoding="utf-8",
     )
     os.chmod(backup / "INSTALL-COMPLETE.txt", 0o600)
@@ -770,9 +1027,11 @@ def print_plan(bundle: InstallBundle, partition: dict[str, Any]) -> None:
     print(f"  Target: {partition['node']} ({partition['size_bytes']:,} bytes), ext4 label=linuxroot")
     print("  Rootfs profile: GNOME Shell + GDM + Tab Companion + matching X810 kernel modules")
     print("  Block write: format only /dev/block/by-name/linuxroot as ext4")
+    print("  Boot backup: preserve Android boot/init_boot/vendor_boot/dtbo and stage verified copies in the new rootfs")
+    print("  First install: if no Android set is already staged, current boot images require an explicit Android confirmation")
     print("  Never written: GPT, userdata, super, boot, init_boot, vendor_boot, dtbo, recovery, vbmeta, firmware")
     print("  Reboot: none; the installer stops in TWRP")
-    print("  Backup: host-side sda GPT metadata only; not a partition/data backup")
+    print("  Backup: host-side sda GPT metadata + four Android boot images; not a full partition/data backup")
 
 
 def run_doctor(serial: str | None = None,
@@ -841,18 +1100,20 @@ def run_install(project: Path, bundle: InstallBundle, serial: str | None = None,
             print("Confirmation did not match; no tablet changes were made.")
             return 1
         backup = write_gpt_backup(client, project, values, partition, bundle)
-        print(f"Read-only GPT metadata backup saved to {backup}; this is not a data backup.")
+        print(f"Read-only GPT metadata backup saved to {backup}.")
+        android_images = save_android_boot_set(client, backup, input_func)
+        print(f"Verified Android boot images saved locally under {backup / 'boot' / 'android'}.")
         try:
             entered = input_func(f"Type exactly `{FORMAT_CONFIRMATION}` to format linuxroot: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("Cancelled; linuxroot was not formatted. GPT metadata backup retained.")
+            print("Cancelled; linuxroot was not formatted. GPT and Android boot backups retained.")
             return 1
         if entered != FORMAT_CONFIRMATION:
-            print("Confirmation did not match; linuxroot was not formatted.")
+            print("Confirmation did not match; linuxroot was not formatted. GPT and Android boot backups retained.")
             return 1
-        format_and_install(client, bundle, backup, account_details, partition)
+        format_and_install(client, bundle, backup, account_details, partition, android_images)
         print(f"\nArch rootfs extracted, fresh {account_details['username']} account created, and read-only filesystem verification passed.")
-        print(f"Install record / GPT metadata backup: {backup}")
+        print(f"Install record / GPT and Android boot backups: {backup}")
         print("No reboot was performed. Manually choose when to leave TWRP after reviewing the result.")
         return 0
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError, EOFError, KeyboardInterrupt) as error:

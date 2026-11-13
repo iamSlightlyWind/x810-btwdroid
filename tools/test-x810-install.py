@@ -38,6 +38,72 @@ class FakeClient:
         status, stdout = self.values.get(key, (0, ""))
         return subprocess.CompletedProcess(["adb", *args], status, stdout, "")
 
+    def read_binary(self, remote_command: str, timeout: int = 180):
+        if remote_command.endswith("name.txt"):
+            return b"Android\n"
+        return b""
+
+
+class BootSetClient:
+    def __init__(self, size_map: dict[str, int], existing: bool = False,
+                 partial: bool = False, directory_exists: bool = False):
+        self.serial = "TESTSERIAL001"
+        self.size_map = size_map
+        self.existing = existing
+        self.partial = partial
+        self.directory_exists = directory_exists
+        self.calls: list[tuple[str, ...]] = []
+        self.binary_reads: list[str] = []
+        self.pushed: dict[str, bytes] = {}
+        self.boot_data = {
+            name: bytes([index + 1]) * size
+            for index, (name, size) in enumerate(size_map.items())
+        }
+
+    def shell(self, *args: str, timeout: int = 30):
+        self.calls.append(tuple(args))
+        status, stdout = 0, ""
+        if args[:2] == ("mount", "-t"):
+            pass
+        elif args[:2] == ("cat", "/proc/mounts"):
+            mount = next(call[-1] for call in self.calls if call[:2] == ("mount", "-t"))
+            stdout = f"{installer.LINUXROOT} {mount} ext4 ro,relatime,noload 0 0\n"
+        elif args[:2] == ("test", "-f"):
+            filename = args[2].rsplit("/", 1)[-1]
+            status = 0 if self.existing and (not self.partial or filename == "boot.img") else 1
+        elif args[:2] == ("test", "-d"):
+            status = 0 if self.existing or self.directory_exists else 1
+        elif args[:2] == ("test", "-L"):
+            status = 1
+        elif args[:2] == ("readlink", "-f") and "/android/" in args[2]:
+            stdout = args[2] + "\n"
+        elif args[:2] == ("readlink", "-f") and args[2].startswith("/dev/block/by-name/"):
+            name = args[2].rsplit("/", 1)[-1]
+            stdout = installer.BOOT_PARTITION_NODES[name] + "\n"
+        elif args[:2] == ("blockdev", "--getsize64"):
+            name = args[2].rsplit("/", 1)[-1]
+            stdout = str(self.size_map[name]) + "\n"
+        return subprocess.CompletedProcess(["adb", *args], status, stdout, "")
+
+    def pull(self, source: str, destination: Path, timeout: int = 120):
+        name = source.rsplit("/", 1)[-1].removesuffix(".img")
+        Path(destination).write_bytes(self.boot_data[name])
+        return subprocess.CompletedProcess(["adb", "pull"], 0, "", "")
+
+    def push(self, source: Path, target: str, timeout: int = 60):
+        self.pushed[target] = Path(source).read_bytes()
+        return subprocess.CompletedProcess(["adb", "push"], 0, "", "")
+
+    def read_binary(self, remote_command: str, timeout: int = 180):
+        self.binary_reads.append(remote_command)
+        if remote_command.startswith("dd if="):
+            name = remote_command.partition("if=")[2].split()[0].rsplit("/", 1)[-1]
+            return self.boot_data[name]
+        if remote_command.startswith("cat "):
+            path = shlex.split(remote_command)[1]
+            return self.pushed.get(path, b"Android\n")
+        return b""
+
 
 class ProvisioningClient:
     def __init__(self):
@@ -91,6 +157,113 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(("test", "-f", f"{root}/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/extension.js"), client.calls)
         self.assertIn(("test", "-f", f"{root}/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json"), client.calls)
         self.assertIn(("grep", "-Fxq", "AutoEnable=true", f"{root}/etc/bluetooth/main.conf"), client.calls)
+
+    def test_installer_saves_existing_android_set_before_linuxroot_format(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        client = BootSetClient(sizes, existing=True)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            backup = Path(temporary)
+            images = installer.save_android_boot_set(client, backup, lambda _prompt: self.fail("no prompt expected"))
+            manifest = json.loads((backup / "android-boot-backup-manifest.json").read_text())
+            self.assertEqual(manifest["source"], "existing-linuxroot")
+            self.assertEqual(set(images), set(sizes))
+            for name, size in sizes.items():
+                self.assertEqual(images[name].stat().st_size, size)
+                self.assertEqual(manifest["images"][name]["sha256"], installer.sha256_file(images[name]))
+            self.assertTrue(any(call[:2] == ("mount", "-t") and "ro,noload" in call for call in client.calls))
+            self.assertTrue(any(call[0] == "umount" for call in client.calls))
+
+    def test_installer_stops_on_partial_android_set_before_format(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        client = BootSetClient(sizes, existing=True, partial=True)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "partial or symlinked Android boot set"):
+                installer.save_android_boot_set(client, Path(temporary), lambda _prompt: "")
+            self.assertTrue(any(call[0] == "umount" for call in client.calls))
+            self.assertNotIn(installer.linuxroot_format_args(), client.calls)
+
+    def test_installer_stops_if_android_set_directory_exists_without_images(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        client = BootSetClient(sizes, directory_exists=True)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "directory is incomplete"):
+                installer.save_android_boot_set(client, Path(temporary), lambda _prompt: "")
+
+    def test_first_install_requires_confirmation_before_treating_live_boot_as_android(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        client = BootSetClient(sizes)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            with self.assertRaisesRegex(RuntimeError, "confirmation did not match"):
+                installer.save_android_boot_set(client, Path(temporary), lambda _prompt: "no")
+            self.assertFalse(any(call.startswith("dd if=") for call in client.binary_reads))
+
+    def test_first_install_saves_confirmed_android_partitions_with_checksums(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        client = BootSetClient(sizes)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            images = installer.save_android_boot_set(
+                client, Path(temporary), lambda _prompt: installer.ANDROID_BOOT_CONFIRMATION
+            )
+            manifest = json.loads((Path(temporary) / "android-boot-backup-manifest.json").read_text())
+            self.assertEqual(manifest["source"], "confirmed-current-partitions")
+            self.assertEqual(set(images), set(sizes))
+            self.assertEqual(len([call for call in client.calls if call[0] == "readlink" and call[1] == "-f"
+                                  and call[2].startswith("/dev/block/by-name/")]), len(sizes))
+            for name, size in sizes.items():
+                self.assertEqual(images[name].stat().st_size, size)
+                self.assertEqual(manifest["images"][name]["sha256"], installer.sha256_file(images[name]))
+
+    def test_install_orchestrates_android_backup_before_format(self):
+        events = []
+        bundle = installer.InstallBundle(Path("/private/rootfs.tar.zst"), "0" * 64, 1024, "test")
+        partition = {"node": installer.LINUXROOT_NODE, "size_bytes": 64 * 1024**3}
+        images = {name: Path(f"/private/{name}.img") for name in installer.BOOT_IMAGE_SIZES}
+        identity = {"device": "gts9p", "bootloader": "X810XXS5CYG1", "twrp": "3.7.1_12-0"}
+        confirmations = iter((installer.INSTALL_CONFIRMATION, installer.FORMAT_CONFIRMATION))
+        with patch.object(installer.platform, "system", return_value="Linux"), \
+             patch.object(installer.shutil, "which", return_value="/fake/adb"), \
+             patch.object(installer, "adb_target", return_value=("TESTSERIAL001", "recovery")), \
+             patch.object(installer, "ADBClient"), \
+             patch.object(installer, "twrp_identity", return_value=(identity, [])), \
+             patch.object(installer, "preflight_twrp_tools", return_value=[]), \
+             patch.object(installer, "validate_partition", return_value=(partition, [])), \
+             patch.object(installer, "prompt_install_details", return_value={
+                 "username": "wind", "full_name": "Wind Station", "hostname": "windstation",
+                 "password_hash": "$6$test",
+             }), \
+             patch.object(installer, "write_gpt_backup", side_effect=lambda *_args: events.append("gpt") or Path("/backup")), \
+             patch.object(installer, "save_android_boot_set", side_effect=lambda *_args: events.append("android") or images), \
+             patch.object(installer, "format_and_install", side_effect=lambda *_args: events.append("format")):
+            status = installer.run_install(
+                Path("/repo"), bundle, input_func=lambda _prompt: next(confirmations)
+            )
+        self.assertEqual(status, 0)
+        self.assertEqual(events, ["gpt", "android", "format"])
+
+    def test_android_set_is_staged_and_each_image_is_readback_verified(self):
+        sizes = {"boot": 11, "init_boot": 7, "vendor_boot": 13, "dtbo": 5}
+        client = BootSetClient(sizes)
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.dict(installer.BOOT_IMAGE_SIZES, sizes, clear=True):
+            source = Path(temporary)
+            images = {}
+            for name, size in sizes.items():
+                path = source / f"{name}.img"
+                path.write_bytes(client.boot_data[name])
+                images[name] = path
+            installer.stage_android_boot_set(client, "/mnt/new-root", images)
+            for name in sizes:
+                target = f"/mnt/new-root/var/lib/x810-boot-sets/android/{name}.img"
+                self.assertIn(target, client.pushed)
+                self.assertEqual(client.pushed[target], client.boot_data[name])
+            self.assertEqual(
+                client.pushed["/mnt/new-root/var/lib/x810-boot-sets/android/name.txt"], b"Android\n"
+            )
 
     def test_extracted_rootfs_rejects_missing_bluetooth_auto_enable(self):
         root = "/mnt/linuxroot"
@@ -269,7 +442,7 @@ Partition name: 'linuxroot'
             with self.subTest(drift=label):
                 client = FakeClient(mapping)
                 with self.assertRaises(RuntimeError):
-                    installer.format_and_install(client, bundle, Path("/not-used"), {}, baseline)
+                    installer.format_and_install(client, bundle, Path("/not-used"), {}, baseline, {})
                 self.assertNotIn(installer.linuxroot_format_args(), client.calls)
 
     def test_plan_only_runs_read_only_checks_without_backup_or_block_write(self):
@@ -314,7 +487,7 @@ Partition name: 'linuxroot'
                 if command_words[:2] != ["command", "-v"]:
                     return subprocess.CompletedProcess(argv, 2, "", "invalid fake preflight command")
                 tool = command_words[2]
-                if tool not in {"sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot"}:
+                if tool not in {"sgdisk", "blockdev", "mke2fs", "e2fsck", "mount", "umount", "sync", "awk", "grep", "readlink", "toybox", "chmod", "chown", "mv", "cp", "mkdir", "rm", "chroot", "dd"}:
                     return subprocess.CompletedProcess(argv, 1, "", "")
                 return subprocess.CompletedProcess(argv, 0, "/system/bin/" + tool + "\n", "")
             if args == ("toybox", "blkid", "-s", "LABEL", installer.LINUXROOT):

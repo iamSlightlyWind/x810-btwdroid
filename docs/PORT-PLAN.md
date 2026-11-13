@@ -47,7 +47,9 @@ package group because of unresolved optional ARM dependencies. Tab Companion
 uses a shared distro backend for package operations; its Arch package provides
 the X810 dualboot UI/helpers. No kernel updater is advertised for Arch.
 
-The dualboot interface needs valid Android and Linux boot sets under
+The installer saves and stages the Android boot set under
+`/var/lib/x810-boot-sets/android`; Tab Companion snapshots the active Linux set
+before switching away. The dualboot interface needs both sets under
 `/var/lib/x810-boot-sets`. Tab Companion's Arch port-update feed uses the
 published `x810-device-support` pacman package; kernel updates remain disabled.
 Display, touch, audio, Bluetooth, charging, thermal, and suspend/resume still

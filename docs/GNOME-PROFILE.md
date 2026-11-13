@@ -10,8 +10,10 @@ dependencies; `gnome-console`, `gnome-boxes`, and `gnome-books` are omitted.
 Tab Companion is built from the shared app source and uses distro adapters for
 native package operations. Its Arch package supplies the Arch-aware dualboot
 backend and GNOME Shell extension metadata. Browser memory limits are exposed
-through the shared Performance page. The dualboot UI requires boot-set images
-under `/var/lib/x810-boot-sets`; this build does not create those images.
+through the shared Performance page. During installation, the installer saves
+the Android boot/init_boot/vendor_boot/dtbo set to the host backup and seeds
+read-back-verified copies under `/var/lib/x810-boot-sets/android`. Tab
+Companion snapshots the active Linux boot set before switching to Android.
 
 Before release, the archive verifier checks package records, systemd links,
 Bluetooth policy, the X810 module release, account seed, and absence of private

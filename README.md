@@ -2,8 +2,9 @@
 
 Arch Linux ARM GNOME rootfs and guarded installer for the Samsung Galaxy Tab
 S9+ Wi-Fi (SM-X810, `gts9pwifi`). The installer replaces only the existing
-`linuxroot` filesystem; Android, boot partitions, GPT, and recovery are not
-written, and it does not reboot.
+`linuxroot` filesystem. It saves the four Android boot images to the host and
+seeds verified copies into the new rootfs, but never writes the Android, boot,
+GPT, or recovery partitions, and does not reboot.
 
 ## Install
 
@@ -17,7 +18,9 @@ python3 tools/x810-install install
 
 The Python installer fetches the latest GitHub release, verifies its manifest,
 checksum, and rootfs contents, then prompts for a new account and explicit
-format confirmation. `--no-update` selects an already cached release.
+format confirmation. If no staged Android set exists in the old rootfs, it
+requires an additional explicit confirmation before treating the current boot
+partitions as Android. `--no-update` selects an already cached release.
 
 ## Build and test
 
