@@ -1,0 +1,135 @@
+#!/usr/bin/sh
+# SPDX-License-Identifier: MIT
+#
+# The upstream hexagonrpcd sensorspd unit intentionally conflicts with
+# suspend.target and is stopped before deep sleep.  Wait until SSC accepts a
+# fresh client after resume; only recover sensorspd if its existing attachment
+# fails to publish the service.  libssc 0.4.4
+# cannot reconnect an existing QMI client after SSC is power-collapsed, so the
+# proxy must then be restarted.  The board's Mutter package deliberately
+# reclaims accelerometer access whenever a new SensorProxy owner appears.
+#
+# The hooks are part of systemd-suspend.service, so the whole post phase runs
+# while suspend.target still has its start job queued, and restarting
+# hexagonrpcd-adsp-sensorspd (which conflicts with suspend.target) is refused
+# outright:
+#
+#   Transaction for hexagonrpcd-adsp-sensorspd.service/restart is destructive
+#   (suspend.target has 'start' job queued, but 'stop' is included in
+#    transaction)
+#
+# ActiveState cannot be used to detect the end of the transaction: a job that is
+# queued but not yet executed leaves the unit reading 'inactive'.  Wait for the
+# pending job itself to disappear before checking or recovering sensorspd.
+set -u
+
+# This helper runs inside gts9wifi-wait-sensor-proxy.service, whose unit has a
+# 210-second start timeout. Bound every phase together and leave at least 30s
+# for systemd to reap the helper and record the result if recovery stalls.
+MAX_RUNTIME_SEC=170
+monotonic_seconds() {
+	IFS=' ' read -r uptime_seconds _ < /proc/uptime || return 1
+	printf '%s\n' "${uptime_seconds%%.*}"
+}
+
+started_at=$(monotonic_seconds)
+deadline=$((started_at + MAX_RUNTIME_SEC))
+
+remaining_seconds() {
+	now=$(monotonic_seconds) || return 1
+	remaining=$((deadline - now))
+	[ "$remaining" -gt 0 ] || return 1
+	printf '%s\n' "$remaining"
+}
+
+run_bounded() {
+	# Leave two seconds for this shell to handle a timeout and exit cleanly.
+	remaining=$(remaining_seconds) || return 124
+	[ "$remaining" -gt 2 ] || return 124
+	command_timeout=$((remaining - 2))
+	timeout --kill-after=1 "${command_timeout}s" "$@"
+}
+
+i=0
+while [ "$i" -lt 90 ]; do
+	if ! jobs=$(run_bounded systemctl list-jobs --no-legend 2>/dev/null); then
+		echo "gts9wifi-sensors-resume: failed or timed out reading systemd jobs" >&2
+		exit 1
+	fi
+	if ! printf '%s\n' "$jobs" | grep -qE 'suspend\.target|systemd-suspend\.service'; then
+		break
+	fi
+	if ! remaining_seconds >/dev/null; then
+		echo "gts9wifi-sensors-resume: deadline expired waiting for suspend transaction" >&2
+		exit 1
+	fi
+	if ! run_bounded sleep 1; then
+		break
+	fi
+	i=$((i + 1))
+done
+if printf '%s\n' "$jobs" | grep -qE 'suspend\.target|systemd-suspend\.service'; then
+	echo "gts9wifi-sensors-resume: suspend transaction did not finish within 90 checks" >&2
+	exit 1
+fi
+
+# The boot-time systemd transaction has already started sensorspd through the
+# wait-sensor-proxy unit's Wants= edge.  Restarting that fresh attachment here
+# races the initial FastRPC/PD registration and can leave the ADSP handover
+# interrupt asserted.  After resume, systemd normally stopped sensorspd via
+# Conflicts=suspend.target, so start it only when it is actually inactive.
+if run_bounded systemctl is-active --quiet hexagonrpcd-adsp-sensorspd.service; then
+	echo "gts9wifi-sensors-resume: keeping the active sensorspd attachment for initial SSC probes"
+else
+	if run_bounded systemctl start hexagonrpcd-adsp-sensorspd.service; then
+		echo "gts9wifi-sensors-resume: started sensorspd; allowing 10s for fresh PD attachment"
+		if ! run_bounded sleep 10; then
+			echo "gts9wifi-sensors-resume: deadline reached settling fresh sensorspd attachment" >&2
+		fi
+	else
+		echo "gts9wifi-sensors-resume: sensorspd start failed; continuing bounded SSC probes" >&2
+	fi
+fi
+
+attempt=0
+restarted_sensorspd=0
+# Each SSC probe has its own four-second cap, while run_bounded() also applies
+# the shared 170-second deadline across the wait, restart, and probe phases.
+while [ "$attempt" -lt 20 ]; do
+	if ! remaining_seconds >/dev/null; then
+		echo "gts9wifi-sensors-resume: overall recovery deadline expired" >&2
+		break
+	fi
+	attempt=$((attempt + 1))
+	output=$(run_bounded timeout 4 ssccli --sensor accelerometer --timeout 2 2>&1 || true)
+	case "$output" in
+	*'Accelerometer sensor measurement:'*)
+		if ! run_bounded systemctl restart iio-sensor-proxy.service; then
+			echo "gts9wifi-sensors-resume: timed out restarting iio-sensor-proxy" >&2
+			exit 1
+		fi
+		echo "gts9wifi-sensors-resume: SSC ready after attempt $attempt; restarted SensorProxy for a fresh QMI client"
+		exit 0
+		;;
+	esac
+	# Give the original attachment five opportunities to publish its service
+	# before performing one controlled recovery.  Never loop ADSP/sensorspd
+	# restarts: a failed attach can reset the shared ADSP and affect audio too.
+	if [ "$attempt" -eq 5 ] && [ "$restarted_sensorspd" -eq 0 ]; then
+		restarted_sensorspd=1
+		echo "gts9wifi-sensors-resume: SSC still unavailable after 5 probes; restarting sensorspd once"
+		if ! run_bounded systemctl restart hexagonrpcd-adsp-sensorspd.service; then
+			echo "gts9wifi-sensors-resume: one-shot sensorspd recovery failed or timed out" >&2
+		fi
+	fi
+	if ! remaining_seconds >/dev/null; then
+		echo "gts9wifi-sensors-resume: overall recovery deadline expired" >&2
+		break
+	fi
+	if ! run_bounded sleep 2; then
+		break
+	fi
+done
+
+echo "gts9wifi-sensors-resume: SSC did not recover after resume" >&2
+exit 1

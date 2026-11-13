@@ -37,7 +37,7 @@ class ArchPortReleaseTests(unittest.TestCase):
     def make_package(self, path: Path, *, pkgname="x810-device-support") -> None:
         with tempfile.TemporaryDirectory() as temporary:
             tar_path = Path(temporary) / "package.tar"
-            pkginfo = f"pkgname = {pkgname}\npkgver = 0.1.0-3\narch = any\n".encode()
+            pkginfo = f"pkgname = {pkgname}\npkgver = 0.1.1-1\narch = aarch64\n".encode()
             with tarfile.open(tar_path, "w") as archive:
                 for name, content in (
                     (".PKGINFO", pkginfo),
@@ -56,10 +56,10 @@ class ArchPortReleaseTests(unittest.TestCase):
         commit, branch = "a" * 40, "main"
         info_path = root / "port-build.json"
         build_info.write_build_info(
-            info_path, version="0.1.0", run_id=run_id, run_number=run_number,
+            info_path, version="0.1.1", run_id=run_id, run_number=run_number,
             commit=commit, branch=branch,
         )
-        package = root / "x810-device-support-0.1.0-3-any.pkg.tar.zst"
+        package = root / "x810-device-support-0.1.1-1-aarch64.pkg.tar.zst"
         self.make_package(package)
         output = root / "update.zip"
         bundle.create_bundle(package, info_path, output)
@@ -107,7 +107,7 @@ class ArchPortReleaseTests(unittest.TestCase):
             manifest = assembler.assemble(
                 release_dir, update, tag=f"x810-arch-build-{run_id}", run_id=run_id,
                 run_number=run_number, commit=commit, branch=branch, input_key=input_key,
-                port_version="0.1.0",
+                port_version="0.1.1",
             )
             self.assertEqual([asset["name"] for asset in manifest["assets"]], ["rootfs.tar.zst", "update.zip"])
             self.assertEqual(manifest["port_update"]["package_name"], "x810-device-support")

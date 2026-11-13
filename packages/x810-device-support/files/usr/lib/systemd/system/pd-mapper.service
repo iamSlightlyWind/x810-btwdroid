@@ -1,0 +1,9 @@
+[Unit]
+Description=Qualcomm PD mapper service
+
+[Service]
+ExecStart=/usr/bin/pd-mapper
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

@@ -3,8 +3,9 @@
 Arch support package for Samsung Galaxy Tab S9+ Wi-Fi (SM-X810). It supplies
 the tablet-specific Tab Companion controls, GNOME device-settings extension,
 thermal limiter, zram defaults, Bluetooth address provisioning, charge-limit
-restore, udev permissions, boot log and GTK rendering settings, and the
-`wpa_supplicant` D-Bus policy.
+restore, udev permissions, boot log and GTK rendering settings, the
+`wpa_supplicant` D-Bus policy, and the Qualcomm SSC sensor stack required for
+GNOME auto-rotation on this tablet.
 
 The clean GNOME image profile enables the validated thermal limiter,
 `gts9wifi-device-control`, Bluetooth address provisioner, charge-limit restore,
@@ -19,6 +20,14 @@ The charge-limit helper stores only an explicitly selected cap in
 has no effect unless that file exists. Fast charge starts off. Thermal policy
 is defined in `/etc/x810-thermal-limit.json` and its runtime health report is
 available to Tab Companion.
+
+The sensor backend replaces Arch's generic `iio-sensor-proxy` with the SSC-
+enabled backend, FastRPC/QRTR services, and the X810-specific orientation
+matrix. The delayed sensor timer starts only after GDM; stock Android vendor,
+APNHLOS, DSP, and persist partitions are mounted read-only. The device-local
+APNHLOS firmware is staged only into the Arch rootfs. See
+`docs/X810-AUTO-ROTATION.md` and `SENSOR-SOURCES.lock` for validation and
+runtime/source identity.
 
 The package itself does not enable units; image profile policy owns enablement.
 The Arch profile is kept separate from Fedora-specific TuneD, power-key, and

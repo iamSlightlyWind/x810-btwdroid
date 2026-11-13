@@ -53,7 +53,7 @@ class BrowserOverlayTests(unittest.TestCase):
         self.assertEqual(port["port_update"], {"backend": "pacman", "available": True})
         self.assertEqual(port["artifact_name"], "update")
         self.assertEqual(port["release_tag_prefix"], "x810-arch-build")
-        self.assertIn("port-build.json", (ROOT / "packages/x810-device-support/PKGBUILD").read_text())
+        self.assertIn('cp -a "$startdir/files/."', (ROOT / "packages/x810-device-support/PKGBUILD").read_text())
         self.assertEqual((ROOT / "PORT_VERSION").read_text().strip(), port["version"])
         for extension in (
             "dualboot@agcarbajo.github.io",

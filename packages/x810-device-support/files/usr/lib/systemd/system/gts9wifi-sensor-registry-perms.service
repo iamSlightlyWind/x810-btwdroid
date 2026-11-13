@@ -1,0 +1,12 @@
+[Unit]
+Description=Stage X810 stock sensor configs and persist registry for hexagonrpcd
+RequiresMountsFor=/vendor /mnt/vendor/persist
+Before=hexagonrpcd-adsp-sensorspd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/gts9wifi-sensor-registry-perms
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

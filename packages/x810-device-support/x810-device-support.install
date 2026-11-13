@@ -5,8 +5,13 @@ post_install() {
 x810-device-support installed. It does not enable or start services during
 package installation. The image profile explicitly enables the validated
 thermal limiter, GNOME device controls, power-profile API, charge-limit restore,
-and Bluetooth address provisioner; manual recovery remains opt-in.
+Bluetooth address provisioner, and delayed X810 SSC sensor initialization.
+Android's vendor, firmware, DSP, and persist partitions are mounted read-only;
+only the tablet-local APNHLOS firmware is staged into the Arch root filesystem.
 NOTICE
+  if command -v systemd-sysusers >/dev/null 2>&1; then
+    systemd-sysusers /usr/lib/sysusers.d/hexagonrpcd.conf || return 1
+  fi
 }
 
 post_upgrade() {

@@ -23,11 +23,11 @@ die() {
     || die "missing package output directory: $packages_dir"
 
 shopt -s nullglob
-device_packages=("$packages_dir"/x810-device-support-*-any.pkg.tar.zst)
+device_packages=("$packages_dir"/x810-device-support-*-aarch64.pkg.tar.zst)
 app_packages=("$packages_dir"/tab-companion-*-any.pkg.tar.zst)
 shopt -u nullglob
 (( ${#device_packages[@]} == 1 )) \
-    || die "expected exactly one local x810-device-support *-any.pkg.tar.zst under $packages_dir; run tools/build-packages.sh and remove stale duplicates"
+    || die "expected exactly one local x810-device-support *-aarch64.pkg.tar.zst under $packages_dir; run tools/build-packages.sh and remove stale duplicates"
 device_package="${device_packages[0]}"
 [[ -f "$device_package" && ! -L "$device_package" && -s "$device_package" ]] \
     || die "X810 device-support package is not a non-empty regular file: $device_package"
@@ -69,8 +69,8 @@ device_identity="$(awk -F: '
     $1 ~ /^[[:space:]]*Architecture[[:space:]]*$/ { arch = $2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", arch) }
     END { print name, arch }
 ' <<< "$device_info")"
-[[ "$device_identity" == "x810-device-support any" ]] \
-    || die "local package metadata is not an architecture-independent x810-device-support package"
+[[ "$device_identity" == "x810-device-support aarch64" ]] \
+    || die "local package metadata is not an AArch64 x810-device-support package"
 
 # Pacman's recent filesystem sandbox depends on Landlock, which is missing in
 # the shipped X810 kernel configuration. Disable only that sandbox in the
@@ -153,6 +153,9 @@ systemctl --root="$rootfs" enable x810-thermal-limit.service >/dev/null
 systemctl --root="$rootfs" enable gts9wifi-device-control.service >/dev/null
 systemctl --root="$rootfs" enable gts9wifi-bt-provision.service >/dev/null
 systemctl --root="$rootfs" enable x810-charge-limit.service >/dev/null
+systemctl --root="$rootfs" enable \
+    gts9wifi-android-parts.service vendor.mount vendor-firmware_mnt.mount \
+    vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer >/dev/null
 
 # Make the supported controller auto-power policy explicit in the target.
 python3 - "$rootfs/etc/bluetooth/main.conf" <<'PY'
@@ -188,7 +191,9 @@ grep -q archarm "$rootfs/usr/local/libexec/x810-boot-switch-core" \
 [[ -f "$rootfs/usr/lib/systemd/system/bluetooth.service" ]] \
     || die "BlueZ package did not install bluetooth.service"
 for unit in tuned.service tuned-ppd.service x810-thermal-limit.service gts9wifi-device-control.service \
-    gts9wifi-bt-provision.service x810-charge-limit.service; do
+    gts9wifi-bt-provision.service x810-charge-limit.service gts9wifi-android-parts.service \
+    vendor.mount vendor-firmware_mnt.mount vendor-dsp.mount mnt-vendor-persist.mount \
+    gts9wifi-wait-sensor-proxy.timer; do
     [[ -f "$rootfs/usr/lib/systemd/system/$unit" ]] \
         || die "X810 feature unit is missing: $unit"
     [[ "$(systemctl --root="$rootfs" is-enabled "$unit")" == enabled ]] \
@@ -207,6 +212,21 @@ grep -Fq "'gnome-gts9wifi@tabs9linux'" "$rootfs/usr/share/glib-2.0/schemas/gsche
     || die "Bluetooth service is not enabled in the staged rootfs"
 grep -qx 'AutoEnable=true' "$rootfs/etc/bluetooth/main.conf" \
     || die "BlueZ AutoEnable is not enabled in the staged rootfs"
+grep -Fxq 'Options=ro,noload,nosuid,nodev,noexec' \
+    "$rootfs/usr/lib/systemd/system/mnt-vendor-persist.mount" \
+    || die "Android persist must be mounted read-only without journal replay"
+grep -Fxq 'Type=erofs' "$rootfs/usr/lib/systemd/system/vendor.mount" \
+    || die "Android vendor logical partition mount is missing"
+for helper in gts9wifi-adsp-boot gts9wifi-android-parts gts9wifi-sensor-registry-perms \
+    gts9wifi-sensors-resume gts9wifi-wait-fastrpc gts9wifi-wait-sensor-proxy \
+    iio-sensor-proxy; do
+    [[ -x "$rootfs/usr/libexec/$helper" ]] || die "X810 sensor helper is missing: $helper"
+done
+for executable in hexagonrpcd pd-mapper ssccli; do
+    [[ -x "$rootfs/usr/bin/$executable" ]] || die "X810 sensor executable is missing: $executable"
+done
+[[ -e "$rootfs/usr/lib/libssc.so.2" && -e "$rootfs/usr/lib/libhexagonrpc.so.0.4" \
+    && -e "$rootfs/usr/lib/libqrtr.so.1" ]] || die "X810 sensor runtime libraries are missing"
 grep -Fxq 'GSK_GPU_DISABLE=merge' "$rootfs/etc/environment.d/91-x810-gtk-rendering.conf" \
     || die "GTK draw-merge workaround is not enabled in the staged rootfs"
 grep -Fxq 'ShowStatus=yes' "$rootfs/etc/systemd/system.conf.d/90-x810-boot-logs.conf" \

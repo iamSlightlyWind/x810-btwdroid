@@ -94,7 +94,7 @@ def build_manifest(package: Path, build_info_path: Path) -> dict[str, Any]:
     if not isinstance(branch, str) or not branch or len(branch) > 200:
         raise ValueError("Arch port build metadata has an invalid branch")
     fields = pacman_package_fields(package)
-    if fields != {"pkgname": "x810-device-support", "pkgver": fields.get("pkgver"), "arch": "any"}:
+    if fields != {"pkgname": "x810-device-support", "pkgver": fields.get("pkgver"), "arch": "aarch64"}:
         raise ValueError("unexpected package name or architecture in update artifact")
     if not SAFE_PACKAGE_VERSION.fullmatch(fields["pkgver"]):
         raise ValueError("support package version is invalid")

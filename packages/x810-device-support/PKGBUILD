@@ -1,13 +1,18 @@
 # SPDX-License-Identifier: MIT
 pkgname=x810-device-support
-pkgver=0.1.0
-pkgrel=6
-pkgdesc='Device controls, thermal and zram support for Samsung Galaxy Tab S9+ Wi-Fi (SM-X810)'
-arch=('any')
-url='https://github.com/iamSlightlyWind/x810-fedroid'
-license=('MIT')
+pkgver=0.1.1
+pkgrel=1
+pkgdesc='Device controls and Qualcomm SSC sensors for Samsung Galaxy Tab S9+ Wi-Fi (SM-X810)'
+arch=('aarch64')
+url='https://github.com/iamSlightlyWind/x810-btwdroid'
+license=('MIT' 'GPL-3.0-only' 'BSD-3-Clause' 'custom:Qualcomm')
 install='x810-device-support.install'
-depends=('systemd' 'python' 'zram-generator' 'dbus' 'wpa_supplicant' 'dtc' 'tuned-ppd')
+provides=('iio-sensor-proxy=3.9')
+conflicts=('iio-sensor-proxy')
+replaces=('iio-sensor-proxy')
+depends=('systemd' 'python' 'zram-generator' 'dbus' 'wpa_supplicant' 'dtc' 'tuned-ppd'
+  'device-mapper' 'libqmi' 'libqrtr-glib' 'protobuf-c' 'glib2' 'libgudev' 'polkit')
+options=('!strip' '!debug')
 backup=(
   'etc/x810-thermal-limit.json'
   'etc/x810-power-profile-tuning.json'
@@ -15,42 +20,15 @@ backup=(
 )
 
 package() {
-  install -Dm0755 "$startdir/files/usr/libexec/x810-thermal-limit" \
-    "$pkgdir/usr/libexec/x810-thermal-limit"
-  install -Dm0644 "$startdir/files/usr/lib/systemd/system/x810-thermal-limit.service" \
-    "$pkgdir/usr/lib/systemd/system/x810-thermal-limit.service"
-  for helper in gts9wifi-bt-provision gts9wifi-bt-revive gts9wifi-device-control x810-charge-limit; do
-    install -Dm0755 "$startdir/files/usr/libexec/$helper" "$pkgdir/usr/libexec/$helper"
-  done
-  for unit in gts9wifi-bt-provision.service gts9wifi-bt-revive.service gts9wifi-device-control.service x810-charge-limit.service; do
-    install -Dm0644 "$startdir/files/usr/lib/systemd/system/$unit" "$pkgdir/usr/lib/systemd/system/$unit"
-  done
-  for rule in 70-gts9wifi-devfreq-perms.rules 71-gts9wifi-touchscreen-perms.rules 72-gts9wifi-charger-perms.rules; do
-    install -Dm0644 "$startdir/files/usr/lib/udev/rules.d/$rule" "$pkgdir/usr/lib/udev/rules.d/$rule"
-  done
-  install -Dm0644 "$startdir/files/usr/share/glib-2.0/schemas/99-gts9wifi.gschema.override" \
-    "$pkgdir/usr/share/glib-2.0/schemas/99-gts9wifi.gschema.override"
-  for file in "$startdir"/files/usr/share/gnome-shell/extensions/gnome-gts9wifi@tabs9linux/*; do
-    install -Dm0644 "$file" "$pkgdir/usr/share/gnome-shell/extensions/gnome-gts9wifi@tabs9linux/${file##*/}"
-  done
-  install -Dm0644 "$startdir/files/etc/x810-thermal-limit.json" \
-    "$pkgdir/etc/x810-thermal-limit.json"
-  install -Dm0644 "$startdir/files/etc/x810-power-profile-tuning.json" \
-    "$pkgdir/etc/x810-power-profile-tuning.json"
-  install -Dm0644 "$startdir/files/etc/systemd/zram-generator.conf.d/80-x810.conf" \
-    "$pkgdir/etc/systemd/zram-generator.conf.d/80-x810.conf"
-  install -Dm0644 "$startdir/files/usr/share/tab-companion/port.json" \
-    "$pkgdir/usr/share/tab-companion/port.json"
-  install -Dm0644 "$startdir/files/usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf" \
-    "$pkgdir/usr/share/dbus-1/system.d/80-x810-wpa_supplicant.conf"
-  install -Dm0644 "$startdir/files/etc/environment.d/91-x810-gtk-rendering.conf" \
-    "$pkgdir/etc/environment.d/91-x810-gtk-rendering.conf"
-  install -Dm0644 "$startdir/files/etc/systemd/system.conf.d/90-x810-boot-logs.conf" \
-    "$pkgdir/etc/systemd/system.conf.d/90-x810-boot-logs.conf"
-  if [[ -s "$startdir/files/usr/share/tab-companion/port-build.json" ]]; then
-    install -Dm0644 "$startdir/files/usr/share/tab-companion/port-build.json" \
-      "$pkgdir/usr/share/tab-companion/port-build.json"
-  fi
+  cp -a "$startdir/files/." "$pkgdir/"
   install -Dm0644 "$startdir/LICENSE" \
     "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm0644 "$startdir/licenses/GPL-3.0.txt" \
+    "$pkgdir/usr/share/licenses/$pkgname/GPL-3.0.txt"
+  install -Dm0644 "$startdir/licenses/pd-mapper-BSD-3-Clause.txt" \
+    "$pkgdir/usr/share/licenses/$pkgname/pd-mapper-BSD-3-Clause.txt"
+  install -Dm0644 "$startdir/licenses/qrtr-BSD-3-Clause.txt" \
+    "$pkgdir/usr/share/licenses/$pkgname/qrtr-BSD-3-Clause.txt"
+  install -Dm0644 "$startdir/licenses/LICENSE.qcom.txt" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE.qcom.txt"
 }

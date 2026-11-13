@@ -1,0 +1,18 @@
+[Unit]
+Description=Recover Qualcomm SSC and start the desktop sensor proxy
+Wants=hexagonrpcd-adsp-sensorspd.service
+After=hexagonrpcd-adsp-sensorspd.service
+# On the X910 reference, GNOME's first SSC client triggers a delayed ADSP
+# handover failure when sensors are claimed too early. Defer the sensor-PD
+# attach and recovery window until the actual desktop consumer exists. It is
+# timer-triggered rather than a graphical.target dependency so missing SSC
+# hardware cannot hold the desktop boot transaction open.
+After=display-manager.service
+ConditionPathExists=/usr/bin/ssccli
+RequiresMountsFor=/vendor /vendor/firmware_mnt /vendor/dsp /mnt/vendor/persist
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/libexec/gts9wifi-sensors-resume
+TimeoutStartSec=210

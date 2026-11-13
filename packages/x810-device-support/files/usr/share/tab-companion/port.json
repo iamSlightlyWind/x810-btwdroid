@@ -9,7 +9,7 @@
   "public_release": true,
   "release_tag_prefix": "x810-arch-build",
   "build_info_path": "/usr/share/tab-companion/port-build.json",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "device_id": "SM-X810",
   "os_id": "archarm",
   "os_version": "rolling",

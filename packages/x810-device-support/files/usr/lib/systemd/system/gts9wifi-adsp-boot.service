@@ -1,0 +1,16 @@
+[Unit]
+Description=Boot the ADSP remoteproc once the rootfs firmware is reachable
+After=local-fs.target
+Requires=vendor-firmware_mnt.mount
+After=vendor-firmware_mnt.mount
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 25
+ExecStart=/usr/libexec/gts9wifi-adsp-boot
+TimeoutStartSec=110
+RemainAfterExit=yes
+
+# Not enabled by default: the ADSP start can hang or reset the SoC.
+[Install]
+WantedBy=multi-user.target
