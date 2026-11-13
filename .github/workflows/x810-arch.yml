@@ -84,7 +84,7 @@ jobs:
     env:
       PODMAN_ROOT_OVERRIDE: /tmp/x810-arch-package-root
       PODMAN_RUNROOT_OVERRIDE: /tmp/x810-arch-package-run
-      X810_BUILDER_PACMAN_CACHE_DIR: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+      X810_BUILDER_PACMAN_CACHE_DIR: ${{ github.workspace }}/cache/builder-pacman
       BUILD_RUN_ID: ${{ needs.publication_identity.outputs.run_id }}
       BUILD_RUN_NUMBER: ${{ needs.publication_identity.outputs.run_number }}
       BUILD_COMMIT: ${{ needs.publication_identity.outputs.commit }}
@@ -99,7 +99,7 @@ jobs:
         id: restore_port_builder_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          path: cache/builder-pacman
           key: x810-arch-builder-pacman-port-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: x810-arch-builder-pacman-port-${{ runner.arch }}-
 
@@ -179,7 +179,7 @@ jobs:
         if: ${{ always() && !cancelled() && steps.build_packages.outcome != 'skipped' }}
         run: |
           set -euo pipefail
-          builder_cache="$RUNNER_TEMP/x810-arch-builder-pacman-cache"
+          builder_cache="$GITHUB_WORKSPACE/cache/builder-pacman"
           source_cache="$GITHUB_WORKSPACE/work/makepkg/sources"
           mkdir -p "$builder_cache" "$source_cache"
           sudo chown -R "$(id -u):$(id -g)" "$builder_cache" "$source_cache"
@@ -199,7 +199,7 @@ jobs:
         if: ${{ always() && !cancelled() && steps.restore_port_builder_cache.outputs.cache-hit != 'true' && steps.finalize_port_caches.outcome == 'success' && steps.finalize_port_caches.outputs.has_builder_cache == 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          path: cache/builder-pacman
           key: x810-arch-builder-pacman-port-${{ runner.arch }}-${{ github.run_id }}
 
       - name: Save makepkg source cache
@@ -425,8 +425,8 @@ jobs:
     env:
       PODMAN_ROOT_OVERRIDE: /tmp/x810-arch-rootfs-root
       PODMAN_RUNROOT_OVERRIDE: /tmp/x810-arch-rootfs-run
-      X810_BUILDER_PACMAN_CACHE_DIR: ${{ runner.temp }}/x810-arch-builder-pacman-cache
-      X810_PACMAN_CACHE_DIR: ${{ runner.temp }}/x810-arch-rootfs-pacman-cache
+      X810_BUILDER_PACMAN_CACHE_DIR: ${{ github.workspace }}/cache/builder-pacman
+      X810_PACMAN_CACHE_DIR: ${{ github.workspace }}/cache/rootfs-pacman
       X810_RELEASE_TAG: ${{ needs.resolve_rootfs.outputs.rootfs_tag }}
       X810_BUILD_INPUTS_KEY: ${{ needs.resolve_rootfs.outputs.rootfs_key }}
       X810_PREBUILT_KERNEL_MODULES: "1"
@@ -449,7 +449,7 @@ jobs:
         id: restore_rootfs_builder_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          path: cache/builder-pacman
           key: x810-arch-builder-pacman-rootfs-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: x810-arch-builder-pacman-rootfs-${{ runner.arch }}-
 
@@ -457,7 +457,7 @@ jobs:
         id: restore_rootfs_pacman_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/x810-arch-rootfs-pacman-cache
+          path: cache/rootfs-pacman
           key: x810-arch-rootfs-pacman-${{ runner.arch }}-${{ github.run_id }}
           restore-keys: x810-arch-rootfs-pacman-${{ runner.arch }}-
 
@@ -528,8 +528,8 @@ jobs:
         if: ${{ always() && !cancelled() && steps.build_rootfs_image.outcome != 'skipped' }}
         run: |
           set -euo pipefail
-          builder_cache="$RUNNER_TEMP/x810-arch-builder-pacman-cache"
-          pacman_cache="$RUNNER_TEMP/x810-arch-rootfs-pacman-cache"
+          builder_cache="$GITHUB_WORKSPACE/cache/builder-pacman"
+          pacman_cache="$GITHUB_WORKSPACE/cache/rootfs-pacman"
           source_cache="$GITHUB_WORKSPACE/work/makepkg/sources"
           mkdir -p "$builder_cache" "$pacman_cache" "$source_cache"
           sudo chown -R "$(id -u):$(id -g)" "$builder_cache" "$pacman_cache" "$source_cache"
@@ -554,14 +554,14 @@ jobs:
         if: ${{ always() && !cancelled() && steps.restore_rootfs_builder_cache.outputs.cache-hit != 'true' && steps.finalize_rootfs_caches.outcome == 'success' && steps.finalize_rootfs_caches.outputs.has_builder_cache == 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/x810-arch-builder-pacman-cache
+          path: cache/builder-pacman
           key: x810-arch-builder-pacman-rootfs-${{ runner.arch }}-${{ github.run_id }}
 
       - name: Save rolling rootfs package cache
         if: ${{ always() && !cancelled() && steps.restore_rootfs_pacman_cache.outputs.cache-hit != 'true' && steps.finalize_rootfs_caches.outcome == 'success' && steps.finalize_rootfs_caches.outputs.has_pacman_cache == 'true' }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: ${{ runner.temp }}/x810-arch-rootfs-pacman-cache
+          path: cache/rootfs-pacman
           key: x810-arch-rootfs-pacman-${{ runner.arch }}-${{ github.run_id }}
 
       - name: Save rootfs makepkg source cache
