@@ -11,12 +11,16 @@ OVERLAY = ROOT / "packages/tab-companion/overlay"
 class BrowserOverlayTests(unittest.TestCase):
     def test_arch_window_overlay_imports_shared_legacy_update_api(self):
         overlay_window = (OVERLAY / "usr/lib/tab-companion/tab_companion/window.py").read_text()
-        source_window = (ROOT.parent / "tab-companion/src/tab_companion/window.py").read_text()
-        source_updates = (ROOT.parent / "tab-companion/src/tab_companion/updates_page.py").read_text()
+        pkgbuild = (ROOT / "packages/tab-companion/PKGBUILD").read_text()
+        source_lock = dict(
+            line.split("=", 1) for line in
+            (ROOT / "packages/tab-companion/SOURCE.lock").read_text().splitlines()
+            if "=" in line and not line.lstrip().startswith("#")
+        )
         self.assertIn("legacy_update_available", overlay_window)
         self.assertNotIn("legacy_ubuntu_update_available", overlay_window)
-        self.assertIn("legacy_update_available", source_window)
-        self.assertIn("def legacy_update_available(", source_updates)
+        self.assertIn(f"#commit={source_lock['source_commit']}", pkgbuild)
+        self.assertIn(f"APP_BUILD_HEAD_SHA={source_lock['source_commit']}", pkgbuild)
 
     def test_browser_selector_and_limits_are_in_arch_package_overlay(self):
         memory = (OVERLAY / "usr/lib/tab-companion/tab_companion/browser_memory.py").read_text()
