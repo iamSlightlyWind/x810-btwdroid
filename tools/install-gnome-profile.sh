@@ -127,9 +127,11 @@ desktop_packages=(
 # replaces it with the SSC-capable implementation; remove the generic package
 # first, in this disposable target rootfs, so --noconfirm cannot reject the
 # conflict prompt and abort the profile build.
-if "$script_dir/pacman-target.sh" --builder-mode -Q iio-sensor-proxy >/dev/null 2>&1; then
-    "$script_dir/pacman-target.sh" --builder-mode -Rdd --noconfirm iio-sensor-proxy
-fi
+for conflicting_package in iio-sensor-proxy libssc; do
+    if "$script_dir/pacman-target.sh" --builder-mode -Q "$conflicting_package" >/dev/null 2>&1; then
+        "$script_dir/pacman-target.sh" --builder-mode -Rdd --noconfirm "$conflicting_package"
+    fi
+done
 "$script_dir/pacman-target.sh" --builder-mode -U --noconfirm \
     "/work/packages/$(basename -- "$device_package")" \
     "/work/packages/$app_name" \

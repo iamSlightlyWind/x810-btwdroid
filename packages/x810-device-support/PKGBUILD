@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: MIT
 pkgname=x810-device-support
 pkgver=0.1.1
-pkgrel=2
+pkgrel=3
 pkgdesc='Device controls and Qualcomm SSC sensors for Samsung Galaxy Tab S9+ Wi-Fi (SM-X810)'
 arch=('aarch64')
 url='https://github.com/iamSlightlyWind/x810-btwdroid'
 license=('MIT' 'GPL-3.0-only' 'BSD-3-Clause' 'custom:Qualcomm')
 install='x810-device-support.install'
 provides=('iio-sensor-proxy=3.9')
-conflicts=('iio-sensor-proxy')
-replaces=('iio-sensor-proxy')
+conflicts=('iio-sensor-proxy' 'libssc')
+replaces=('iio-sensor-proxy' 'libssc')
 depends=('systemd' 'python' 'zram-generator' 'dbus' 'wpa_supplicant' 'dtc' 'tuned-ppd'
   'device-mapper' 'libqmi' 'libqrtr-glib' 'protobuf-c' 'glib2' 'libgudev' 'polkit')
 options=('!strip' '!debug')

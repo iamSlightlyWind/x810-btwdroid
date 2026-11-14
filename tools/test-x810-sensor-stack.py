@@ -59,7 +59,8 @@ class SensorStackTests(unittest.TestCase):
         pkgbuild = (ROOT / "packages/x810-device-support/PKGBUILD").read_text(encoding="utf-8")
         self.assertIn("arch=('aarch64')", pkgbuild)
         self.assertIn("provides=('iio-sensor-proxy=3.9')", pkgbuild)
-        self.assertIn("conflicts=('iio-sensor-proxy')", pkgbuild)
+        self.assertIn("conflicts=('iio-sensor-proxy' 'libssc')", pkgbuild)
+        self.assertIn("replaces=('iio-sensor-proxy' 'libssc')", pkgbuild)
         self.assertIn("LICENSE.qcom.txt", pkgbuild)
         self.assertIn("'device-mapper'", pkgbuild)
         for executable in ("hexagonrpcd", "pd-mapper", "ssccli", "monitor-sensor"):
