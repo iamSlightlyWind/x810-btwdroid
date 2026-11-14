@@ -95,6 +95,8 @@ class RootfsImageProfileTests(unittest.TestCase):
         for helper in ("gts9wifi-bt-provision", "gts9wifi-device-control", "x810-charge-limit"):
             self.assertIn(helper, profile)
         self.assertIn("gnome-gts9wifi@tabs9linux/extension.js", profile)
+        self.assertIn("gsettings --schemadir", profile)
+        self.assertNotIn("gschemas.compiled\" \\\n    || die \"X810 GNOME device-controls extension is not in the compiled default schema\"", profile)
         self.assertIn('audit_fail "$label"', audit)
 
     def test_installer_fetches_a_public_release_and_supports_offline_cache(self):

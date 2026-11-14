@@ -213,7 +213,10 @@ for helper in gts9wifi-bt-provision gts9wifi-bt-revive gts9wifi-device-control x
 done
 [[ -s "$rootfs/usr/share/gnome-shell/extensions/gnome-gts9wifi@tabs9linux/extension.js" ]] \
     || die "X810 GNOME device-controls extension is missing"
-grep -Fq "'gnome-gts9wifi@tabs9linux'" "$rootfs/usr/share/glib-2.0/schemas/gschemas.compiled" \
+schema_extensions="$(gsettings --schemadir "$rootfs/usr/share/glib-2.0/schemas" \
+    get org.gnome.shell enabled-extensions)" \
+    || die "could not read the compiled GNOME extension defaults"
+grep -Fq "'gnome-gts9wifi@tabs9linux'" <<< "$schema_extensions" \
     || die "X810 GNOME device-controls extension is not in the compiled default schema"
 [[ "$(systemctl --root="$rootfs" is-enabled gdm.service)" == enabled ]] \
     || die "GDM is not enabled in the staged rootfs"
