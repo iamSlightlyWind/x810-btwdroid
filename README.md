@@ -7,6 +7,35 @@ seeds verified copies into the new rootfs, and writes the verified Linux set to
 `boot`, `init_boot`, `vendor_boot`, and `dtbo`. It does not write GPT,
 userdata, recovery, vbmeta, or firmware, and does not reboot.
 
+## Hardware compatibility
+
+Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a specific validation · ❌ not working/unavailable · ❓ not tested.
+
+| Component | Status | X810 status |
+|---|:---:|---|
+| Display | ✅ | 2800×1752 AMOLED up at 120 Hz |
+| Desktop | ✅ | GDM, GNOME on Wayland |
+| GPU / rendering | ✅ | Adreno 740 hardware acceleration |
+| Touchscreen | ✅ | FTS1BA90A touch aligns across the 2800×1752 panel |
+| S Pen | 🟡 | No S Pen to test |
+| Book keyboard cover | ✅ | EF-DX815 works |
+| Wi-Fi | ✅ | WCN6855/ath11k |
+| Bluetooth | ✅ | Mouse and earbuds tested working |
+| Speakers | ✅ | All four speakers work |
+| Microphones | ✅ | Microphone works |
+| Cameras | ✅ | Both cameras work |
+| Hardware video decode | ✅ | Verified working and recognizable by Moonlight |
+| Qualcomm NPU / HTP | ❌ | CDSP remains disabled; no Linux QNN/HTP runtime is integrated |
+| Motion sensors / auto-rotation | ✅ | Motion sensors work with GNOME auto-rotate |
+| Battery / charging | 🟡 | Finicky. Direct charging works, but USB hub power passthrough charges slowly and may not charge. Charging bypass doesn't work |
+| Fast Charging | ✅ | PD and PPS negotiate correctly; requires enabling fast charging in Tab Companion |
+| USB-C / powered USB hub | ✅ | USB devices work |
+| External monitor | ✅ | HDMI/Type-C monitors work |
+| Haptics | ✅ | Physical tablet vibration works through the kernel haptics path |
+| Suspend / resume | ✅ | Suspend and wake work |
+| Fingerprint reader | ❌ | Not working |
+| Charging bypass | ❌ | No safe, verified Linux control is available |
+
 ## Install
 
 With the tablet already in TWRP and attached to a Linux host:

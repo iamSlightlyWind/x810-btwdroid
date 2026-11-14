@@ -123,6 +123,13 @@ desktop_packages=(
 # installed their declared repository dependencies above. The local device
 # support package provides the X810 zram configuration and conservative
 # full X810 tablet control layer and conservative thermal limiter.
+# GNOME pulls in the repository iio-sensor-proxy. The X810 package deliberately
+# replaces it with the SSC-capable implementation; remove the generic package
+# first, in this disposable target rootfs, so --noconfirm cannot reject the
+# conflict prompt and abort the profile build.
+if "$script_dir/pacman-target.sh" --builder-mode -Q iio-sensor-proxy >/dev/null 2>&1; then
+    "$script_dir/pacman-target.sh" --builder-mode -Rdd --noconfirm iio-sensor-proxy
+fi
 "$script_dir/pacman-target.sh" --builder-mode -U --noconfirm \
     "/work/packages/$(basename -- "$device_package")" \
     "/work/packages/$app_name" \
