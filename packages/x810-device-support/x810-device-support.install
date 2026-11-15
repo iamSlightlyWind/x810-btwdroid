@@ -4,6 +4,7 @@ enable_sensor_units() {
   systemctl --root=/ enable \
     gts9wifi-android-parts.service vendor.mount vendor-firmware_mnt.mount \
     vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer \
+    gts9wifi-audio-session.timer \
     || return 1
 }
 
@@ -15,10 +16,10 @@ prepare_sensor_account() {
 
 post_install() {
   cat <<'NOTICE'
-x810-device-support installed. The delayed X810 SSC sensor timer and the
-read-only Android vendor/firmware/DSP/persist mounts are enabled. The sensor
-stack starts asynchronously after GDM; stock APNHLOS firmware is only staged
-into the Arch root filesystem. Other device services retain image-profile
+x810-device-support installed. The delayed X810 audio/sensor timers and the
+read-only Android vendor/firmware/DSP/persist mounts are enabled. They start
+asynchronously after GDM; the stock APNHLOS ADSP image is staged from its
+read-only mount when ADSP startup runs. Other device services retain image-profile
 enablement policy.
 NOTICE
   prepare_sensor_account && enable_sensor_units

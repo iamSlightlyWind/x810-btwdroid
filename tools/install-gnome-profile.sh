@@ -103,7 +103,14 @@ desktop_packages=(
     bluez-utils
     tuned-ppd
     dtc
+    alsa-ucm-conf
+    alsa-utils
+    pipewire
+    pipewire-audio
+    pipewire-alsa
     pipewire-jack
+    pipewire-pulse
+    wireplumber
     noto-fonts
     python
     python-gobject
@@ -164,7 +171,8 @@ systemctl --root="$rootfs" enable gts9wifi-bt-provision.service >/dev/null
 systemctl --root="$rootfs" enable x810-charge-limit.service >/dev/null
 systemctl --root="$rootfs" enable \
     gts9wifi-android-parts.service vendor.mount vendor-firmware_mnt.mount \
-    vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer >/dev/null
+    vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer \
+    gts9wifi-audio-session.timer >/dev/null
 
 # Make the supported controller auto-power policy explicit in the target.
 python3 - "$rootfs/etc/bluetooth/main.conf" <<'PY'
@@ -181,9 +189,16 @@ path.write_text(updated, encoding="utf-8")
 PY
 
 for package in x810-device-support zram-generator gdm gnome-shell gnome-session gnome-control-center \
-    gnome-terminal brave-bin bluez bluez-utils tuned-ppd dtc pipewire-jack noto-fonts tab-companion; do
+    gnome-terminal brave-bin bluez bluez-utils tuned-ppd dtc alsa-ucm-conf alsa-utils pipewire pipewire-audio \
+    pipewire-alsa pipewire-jack pipewire-pulse wireplumber noto-fonts tab-companion; do
     "$script_dir/pacman-target.sh" --builder-mode -Q "$package" >/dev/null \
         || die "expected desktop package is missing from staged rootfs: $package"
+done
+[[ -s "$rootfs/usr/lib/firmware/qcom/sm8550/Samsung-Galaxy-Tab-S9-tplg.bin" ]] \
+    || die "X810 AudioReach topology is missing from the staged rootfs"
+for firmware in cs35l45-dsp1-spk-prot.wmfw cs35l45-dsp1-spk-prot.bin; do
+    [[ -s "$rootfs/usr/lib/firmware/cirrus/$firmware" ]] \
+        || die "CS35L45 protection firmware is missing from the staged rootfs: $firmware"
 done
 for helper in x810-boot-switch-core tab-companion-boot-status tab-companion-boot-switch; do
     [[ -x "$rootfs/usr/local/libexec/$helper" ]] \
@@ -202,7 +217,7 @@ grep -q archarm "$rootfs/usr/local/libexec/x810-boot-switch-core" \
 for unit in tuned.service tuned-ppd.service x810-thermal-limit.service gts9wifi-device-control.service \
     gts9wifi-bt-provision.service x810-charge-limit.service gts9wifi-android-parts.service \
     vendor.mount vendor-firmware_mnt.mount vendor-dsp.mount mnt-vendor-persist.mount \
-    gts9wifi-wait-sensor-proxy.timer; do
+    gts9wifi-wait-sensor-proxy.timer gts9wifi-audio-session.timer; do
     [[ -f "$rootfs/usr/lib/systemd/system/$unit" ]] \
         || die "X810 feature unit is missing: $unit"
     [[ "$(systemctl --root="$rootfs" is-enabled "$unit")" == enabled ]] \

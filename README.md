@@ -21,8 +21,8 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 | Book keyboard cover | ✅ | EF-DX815 works |
 | Wi-Fi | ✅ | WCN6855/ath11k |
 | Bluetooth | ✅ | Mouse and earbuds tested working |
-| Speakers | ✅ | All four speakers work |
-| Microphones | ✅ | Microphone works |
+| Speakers | 🟡 | Arch audio session/UCM routing has been ported from the validated Fedora setup; Windstation still reports Dummy Output, so Arch playback is not yet verified |
+| Microphones | 🟡 | Same shared ALSA/UCM/ADSP path; Arch capture not yet verified |
 | Cameras | ✅ | Both cameras work |
 | Hardware video decode | ✅ | Verified working and recognizable by Moonlight |
 | Qualcomm NPU / HTP | ❌ | CDSP remains disabled; no Linux QNN/HTP runtime is integrated |

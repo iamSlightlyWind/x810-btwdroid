@@ -20,6 +20,7 @@
 *.img.xz
 *.raw
 *.bin
+*.wmfw
 *.ko
 *.ko.*
 *.pkg.tar.*

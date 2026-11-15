@@ -42,6 +42,12 @@ SRCDEST=/workspace/$project_name/work/makepkg/sources
 PKGDEST=/workspace/$project_name/out/packages
 EOF
 
+# The kernel requests a board-named AudioReach topology which is not shipped
+# by Arch's generic linux-firmware split packages. Generate the pinned public
+# SM8550 topology and X810 MI2S routing patch before packaging device support.
+"$script_dir/stage-x810-audioreach-topology.sh"
+"$script_dir/stage-x810-cs35l45-firmware.sh"
+
 for name in x810-device-support tab-companion brave-bin; do
     package_dir="$project_dir/packages/$name"
     [[ -f "$package_dir/PKGBUILD" ]] || { echo "Missing PKGBUILD: $package_dir" >&2; exit 1; }

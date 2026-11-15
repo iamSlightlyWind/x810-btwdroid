@@ -17,6 +17,37 @@ def read(relative: str) -> str:
 
 
 class SensorStackTests(unittest.TestCase):
+    def test_x810_audio_profile_and_wireplumber_routing_are_packaged(self):
+        pkgbuild = (PACKAGE / "PKGBUILD").read_text(encoding="utf-8")
+        for dependency in ("alsa-ucm-conf", "pipewire", "pipewire-audio", "pipewire-alsa",
+                          "pipewire-pulse", "wireplumber", "alsa-utils"):
+            self.assertIn(f"'{dependency}'", pkgbuild)
+        profile = read("usr/share/wireplumber/wireplumber.conf.d/90-x810-audio-routing.conf")
+        self.assertIn("monitor.v4l2 = disabled", profile)
+        self.assertIn('device.name = "alsa_card.comprC0"', profile)
+        card = read("usr/share/alsa/ucm2/Qualcomm/sm8550/GTS9/Samsung-Galaxy-Tab-S9.conf")
+        hifi = read("usr/share/alsa/ucm2/Qualcomm/sm8550/GTS9/HiFi.conf")
+        self.assertIn('File "/Qualcomm/sm8550/GTS9/HiFi.conf"', card)
+        self.assertIn('PlaybackPCM "hw:${CardId},0"', hifi)
+        self.assertTrue((FILES / "usr/share/alsa/ucm2/conf.d/sm8550/Samsung-Galaxy-Tab-S9.conf").is_symlink())
+        audio_service = read("usr/lib/systemd/system/gts9wifi-audio-session.service")
+        audio_timer = read("usr/lib/systemd/system/gts9wifi-audio-session.timer")
+        audio_helper = read("usr/libexec/gts9wifi-audio-session")
+        self.assertIn("Wants=gts9wifi-adsp-boot.service hexagonrpcd-adsp-rootpd.service pd-mapper.service alsa-restore.service", audio_service)
+        self.assertIn("OnBootSec=5s", audio_timer)
+        self.assertIn("/dev/snd/controlC0", audio_helper)
+        self.assertIn('name") == "alsa_card.platform-sound"', audio_helper)
+        profile_script = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
+        self.assertIn("gts9wifi-audio-session.timer", profile_script)
+        self.assertIn("stage-x810-audioreach-topology.sh", (ROOT / "tools/build-packages.sh").read_text(encoding="utf-8"))
+        self.assertIn("stage-x810-cs35l45-firmware.sh", (ROOT / "tools/build-packages.sh").read_text(encoding="utf-8"))
+        topology_stager = (ROOT / "tools/stage-x810-audioreach-topology.sh").read_text(encoding="utf-8")
+        self.assertIn("SM8550-HDK-tplg.bin", topology_stager)
+        self.assertIn("Samsung-Galaxy-Tab-S9-tplg.bin", topology_stager)
+        self.assertIn("I2S_SD1", topology_stager)
+        self.assertIn("X810 AudioReach topology is missing", profile_script)
+        self.assertIn("CS35L45 protection firmware is missing", profile_script)
+
     def test_android_logical_partition_mapping_is_verified_read_only(self):
         helper = read("usr/libexec/gts9wifi-android-parts")
         self.assertIn('["dmsetup", "--readonly", "create", map_name', helper)
@@ -97,6 +128,7 @@ class SensorStackTests(unittest.TestCase):
         self.assertIn("post_upgrade()", hook)
         self.assertIn("systemctl --root=/ enable", hook)
         self.assertIn("gts9wifi-wait-sensor-proxy.timer", hook)
+        self.assertIn("gts9wifi-audio-session.timer", hook)
         self.assertNotIn("--now", hook)
 
 
