@@ -48,6 +48,21 @@ class SensorStackTests(unittest.TestCase):
         self.assertIn("X810 AudioReach topology is missing", profile_script)
         self.assertIn("CS35L45 protection firmware is missing", profile_script)
 
+    def test_panel_coldboot_recovery_runs_before_gdm_and_keeps_console(self):
+        unit = read("usr/lib/systemd/system/gts9wifi-panel-coldboot-recover.service")
+        helper = read("usr/libexec/gts9wifi-panel-coldboot-recover")
+        profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
+        hook = (PACKAGE / "x810-device-support.install").read_text(encoding="utf-8")
+        self.assertIn("ConditionPathExists=/sys/power/pm_test", unit)
+        self.assertIn("Before=display-manager.service", unit)
+        self.assertIn("WantedBy=graphical.target", unit)
+        self.assertIn('echo platform > "$PM_TEST"', helper)
+        self.assertIn('echo mem > "$PM_STATE"', helper)
+        self.assertIn('echo none > "$PM_TEST"', helper)
+        self.assertIn("gts9wifi-panel-coldboot-recover.service", profile)
+        self.assertIn("gts9wifi-panel-coldboot-recover.service", hook)
+        self.assertIn("getty@tty3.service", profile)
+
     def test_android_logical_partition_mapping_is_verified_read_only(self):
         helper = read("usr/libexec/gts9wifi-android-parts")
         self.assertIn('["dmsetup", "--readonly", "create", map_name', helper)
@@ -129,6 +144,7 @@ class SensorStackTests(unittest.TestCase):
         self.assertIn("systemctl --root=/ enable", hook)
         self.assertIn("gts9wifi-wait-sensor-proxy.timer", hook)
         self.assertIn("gts9wifi-audio-session.timer", hook)
+        self.assertIn("getty@tty3.service", hook)
         self.assertNotIn("--now", hook)
 
 

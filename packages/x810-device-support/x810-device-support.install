@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: MIT
 
-enable_sensor_units() {
+enable_device_units() {
   systemctl --root=/ enable \
     gts9wifi-android-parts.service vendor.mount vendor-firmware_mnt.mount \
     vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer \
-    gts9wifi-audio-session.timer \
+    gts9wifi-audio-session.timer gts9wifi-panel-coldboot-recover.service \
+    getty@tty3.service \
     || return 1
 }
 
@@ -16,15 +17,13 @@ prepare_sensor_account() {
 
 post_install() {
   cat <<'NOTICE'
-x810-device-support installed. The delayed X810 audio/sensor timers and the
-read-only Android vendor/firmware/DSP/persist mounts are enabled. They start
-asynchronously after GDM; the stock APNHLOS ADSP image is staged from its
-read-only mount when ADSP startup runs. Other device services retain image-profile
-enablement policy.
+x810-device-support installed. The X810 cold-boot panel recovery, delayed
+audio/sensor timers, VT3 text console, and read-only Android mounts are
+enabled. The panel recovery runs before GDM; audio/sensor work is deferred.
 NOTICE
-  prepare_sensor_account && enable_sensor_units
+  prepare_sensor_account && enable_device_units
 }
 
 post_upgrade() {
-  prepare_sensor_account && enable_sensor_units
+  prepare_sensor_account && enable_device_units
 }

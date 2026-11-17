@@ -13,7 +13,7 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 
 | Component | Status | X810 status |
 |---|:---:|---|
-| Display | ✅ | 2800×1752 AMOLED up at 120 Hz |
+| Display | 🟡 | Panel needs a boot-time platform suspend/resume cycle after Samsung's cold-boot handoff; recovery is enabled before GDM, pending next-boot confirmation |
 | Desktop | ✅ | GDM, GNOME on Wayland |
 | GPU / rendering | ✅ | Adreno 740 hardware acceleration |
 | Touchscreen | ✅ | FTS1BA90A touch aligns across the 2800×1752 panel |
@@ -84,3 +84,8 @@ caches are removed before release, so no cache is shipped in the image.
 The image includes GNOME Settings, GNOME Terminal, Brave, Bluetooth, and Tab
 Companion. No build-time user, SSH key, Wi-Fi credentials, or Tailscale state
 is part of the public rootfs.
+
+Boot kernel output is routed to the framebuffer console (`tty0`) and systemd
+service status is enabled. The panel's cold-boot recovery runs before GDM. A
+text login is available on VT3 (`Ctrl`+`Alt`+`F3`) without disabling GDM;
+switch back to GNOME with `Ctrl`+`Alt`+`F1` or `F2`.
