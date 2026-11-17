@@ -21,9 +21,9 @@ x810-device-support installed. The X810 cold-boot panel recovery, delayed
 audio/sensor timers, VT3 text console, and read-only Android mounts are
 enabled. The panel recovery runs before GDM; audio/sensor work is deferred.
 NOTICE
-  prepare_sensor_account && enable_device_units
+  prepare_sensor_account && enable_device_units && systemctl daemon-reload
 }
 
 post_upgrade() {
-  prepare_sensor_account && enable_device_units
+  prepare_sensor_account && enable_device_units && systemctl daemon-reload
 }

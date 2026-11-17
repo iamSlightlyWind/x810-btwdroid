@@ -152,6 +152,13 @@ glib-compile-schemas "$rootfs/usr/share/glib-2.0/schemas"
     || die "X810 GTK rendering workaround is missing from x810-device-support"
 [[ -s "$rootfs/etc/systemd/system.conf.d/90-x810-boot-logs.conf" ]] \
     || die "systemd boot progress policy is missing from x810-device-support"
+[[ -s "$rootfs/etc/systemd/logind.conf.d/10-gts9wifi-lid.conf" ]] \
+    || die "X810 no-suspend policy is missing from x810-device-support"
+for target in sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target; do
+    [[ -L "$rootfs/etc/systemd/system/$target" && \
+        "$(readlink "$rootfs/etc/systemd/system/$target")" == /dev/null ]] \
+        || die "unsafe systemd sleep target is not masked: $target"
+done
 [[ -s "$rootfs/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json" ]] \
     || die "Arch dualboot extension metadata was not installed"
 

@@ -13,7 +13,7 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 
 | Component | Status | X810 status |
 |---|:---:|---|
-| Display | 🟡 | Panel needs a boot-time platform suspend/resume cycle after Samsung's cold-boot handoff; recovery is enabled before GDM, pending next-boot confirmation |
+| Display | 🟡 | Cold-boot panel recovery runs before GDM; real system suspend stays disabled until the X810 UFS/SoC resume path is reliable |
 | Desktop | ✅ | GDM, GNOME on Wayland |
 | GPU / rendering | ✅ | Adreno 740 hardware acceleration |
 | Touchscreen | ✅ | FTS1BA90A touch aligns across the 2800×1752 panel |
@@ -89,3 +89,8 @@ Boot kernel output is routed to the framebuffer console (`tty0`) and systemd
 service status is enabled. The panel's cold-boot recovery runs before GDM. A
 text login is available on VT3 (`Ctrl`+`Alt`+`F3`) without disabling GDM;
 switch back to GNOME with `Ctrl`+`Alt`+`F1` or `F2`.
+
+System sleep targets are masked on the X810 until its deep-suspend resume path
+is fixed. A failed resume previously timed out initializing the UFS PHY and
+forced the root filesystem read-only; automatic suspend would therefore cause
+I/O stalls and data-loss risk.

@@ -63,6 +63,25 @@ class SensorStackTests(unittest.TestCase):
         self.assertIn("gts9wifi-panel-coldboot-recover.service", hook)
         self.assertIn("getty@tty3.service", profile)
 
+    def test_unverified_suspend_targets_are_masked_for_x810(self):
+        package = PACKAGE / "files"
+        policy = (package / "etc/systemd/logind.conf.d/10-gts9wifi-lid.conf").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("HandleLidSwitch=ignore", policy)
+        self.assertIn("HoldoffTimeoutSec=0", policy)
+        for target in (
+            "sleep.target",
+            "suspend.target",
+            "hibernate.target",
+            "hybrid-sleep.target",
+            "suspend-then-hibernate.target",
+        ):
+            mask = package / "etc/systemd/system" / target
+            self.assertTrue(mask.is_symlink(), f"missing systemd mask: {mask}")
+            self.assertEqual(mask.readlink(), Path("/dev/null"))
+        self.assertIn("systemctl daemon-reload", (PACKAGE / "x810-device-support.install").read_text())
+
     def test_android_logical_partition_mapping_is_verified_read_only(self):
         helper = read("usr/libexec/gts9wifi-android-parts")
         self.assertIn('["dmsetup", "--readonly", "create", map_name', helper)
