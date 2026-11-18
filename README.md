@@ -13,7 +13,7 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 
 | Component | Status | X810 status |
 |---|:---:|---|
-| Display | 🟡 | Automatic panel suspend-test recovery is disabled: on Arch it coincided with DPU frame timeouts that stalled GNOME |
+| Display | 🟡 | Recovery now runs after GDM; the previous pre-GDM cycle coincided with DPU frame timeouts and USB-host loss |
 | Desktop | ✅ | GDM, GNOME on Wayland |
 | GPU / rendering | ✅ | Adreno 740 hardware acceleration |
 | Touchscreen | ✅ | FTS1BA90A touch aligns across the 2800×1752 panel |

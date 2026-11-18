@@ -1,0 +1,14 @@
+[Unit]
+Description=Initialize the SM-X810 panel after Samsung's cold-boot handoff
+ConditionPathExists=/sys/power/pm_test
+After=local-fs.target display-manager.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/bin/sleep 10
+ExecStart=/usr/libexec/gts9wifi-panel-coldboot-recover
+TimeoutStartSec=45
+
+[Install]
+WantedBy=graphical.target

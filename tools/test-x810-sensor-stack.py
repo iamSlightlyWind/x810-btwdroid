@@ -48,12 +48,21 @@ class SensorStackTests(unittest.TestCase):
         self.assertIn("X810 AudioReach topology is missing", profile_script)
         self.assertIn("CS35L45 protection firmware is missing", profile_script)
 
-    def test_panel_coldboot_suspend_test_is_not_run_automatically(self):
+    def test_panel_recovery_runs_after_gdm_and_restores_usb_host(self):
+        unit = read("usr/lib/systemd/system/gts9wifi-panel-coldboot-recover.service")
+        helper = read("usr/libexec/gts9wifi-panel-coldboot-recover")
+        usb_helper = read("usr/libexec/gts9wifi-usb-host-resume")
         profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
         hook = (PACKAGE / "x810-device-support.install").read_text(encoding="utf-8")
-        self.assertNotIn("gts9wifi-panel-coldboot-recover", profile)
-        self.assertNotIn("gts9wifi-panel-coldboot-recover", hook)
-        self.assertNotIn("/sys/power/pm_test", profile + hook)
+        self.assertIn("After=local-fs.target display-manager.service", unit)
+        self.assertNotIn("Before=display-manager.service", unit)
+        self.assertIn("ExecStartPre=/bin/sleep 10", unit)
+        self.assertIn('echo platform > "$PM_TEST"', helper)
+        self.assertIn('echo mem > "$PM_STATE"', helper)
+        self.assertIn('/usr/libexec/gts9wifi-usb-host-resume', helper)
+        self.assertIn('[ "$(cat "$role")" = host ]', usb_helper)
+        self.assertIn("gts9wifi-panel-coldboot-recover.service", profile)
+        self.assertIn("gts9wifi-panel-coldboot-recover.service", hook)
         self.assertIn("getty@tty3.service", profile)
 
     def test_unverified_suspend_targets_are_masked_for_x810(self):

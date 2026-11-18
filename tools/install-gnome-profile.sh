@@ -180,7 +180,7 @@ systemctl --root="$rootfs" enable x810-charge-limit.service >/dev/null
 systemctl --root="$rootfs" enable \
     gts9wifi-android-parts.service vendor.mount vendor-firmware_mnt.mount \
     vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer \
-    gts9wifi-audio-session.timer >/dev/null
+    gts9wifi-audio-session.timer gts9wifi-panel-coldboot-recover.service >/dev/null
 
 # Make the supported controller auto-power policy explicit in the target.
 python3 - "$rootfs/etc/bluetooth/main.conf" <<'PY'
@@ -225,14 +225,15 @@ grep -q archarm "$rootfs/usr/local/libexec/x810-boot-switch-core" \
 for unit in tuned.service tuned-ppd.service x810-thermal-limit.service gts9wifi-device-control.service \
     gts9wifi-bt-provision.service x810-charge-limit.service gts9wifi-android-parts.service \
     vendor.mount vendor-firmware_mnt.mount vendor-dsp.mount mnt-vendor-persist.mount \
-    gts9wifi-wait-sensor-proxy.timer gts9wifi-audio-session.timer; do
+    gts9wifi-wait-sensor-proxy.timer gts9wifi-audio-session.timer \
+    gts9wifi-panel-coldboot-recover.service; do
     [[ -f "$rootfs/usr/lib/systemd/system/$unit" ]] \
         || die "X810 feature unit is missing: $unit"
     [[ "$(systemctl --root="$rootfs" is-enabled "$unit")" == enabled ]] \
         || die "X810 feature unit is not enabled: $unit"
 done
 for helper in gts9wifi-bt-provision gts9wifi-bt-revive gts9wifi-device-control \
-    x810-charge-limit; do
+    gts9wifi-panel-coldboot-recover gts9wifi-usb-host-resume x810-charge-limit; do
     [[ -x "$rootfs/usr/libexec/$helper" ]] || die "X810 feature helper is missing: $helper"
 done
 [[ -s "$rootfs/usr/share/gnome-shell/extensions/gnome-gts9wifi@tabs9linux/extension.js" ]] \
