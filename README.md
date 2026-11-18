@@ -13,7 +13,7 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 
 | Component | Status | X810 status |
 |---|:---:|---|
-| Display | 🟡 | Recovery now runs after GDM; the previous pre-GDM cycle coincided with DPU frame timeouts and USB-host loss |
+| Display | ✅ | 2800×1752 AMOLED panel initializes at boot; recovery runs after GDM |
 | Desktop | ✅ | GDM, GNOME on Wayland |
 | GPU / rendering | ✅ | Adreno 740 hardware acceleration |
 | Touchscreen | ✅ | FTS1BA90A touch aligns across the 2800×1752 panel |
@@ -21,7 +21,7 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 | Book keyboard cover | ✅ | EF-DX815 works |
 | Wi-Fi | ✅ | WCN6855/ath11k |
 | Bluetooth | ✅ | Mouse and earbuds tested working |
-| Speakers | 🟡 | Arch audio session/UCM routing has been ported from the validated Fedora setup; Windstation still reports Dummy Output, so Arch playback is not yet verified |
+| Speakers | ✅ | Built-in speakers play audio through the X810 AudioReach/UCM and PipeWire setup |
 | Microphones | 🟡 | Same shared ALSA/UCM/ADSP path; Arch capture not yet verified |
 | Cameras | ✅ | Both cameras work |
 | Hardware video decode | ✅ | Verified working and recognizable by Moonlight |
