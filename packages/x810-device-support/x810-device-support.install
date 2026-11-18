@@ -4,8 +4,7 @@ enable_device_units() {
   systemctl --root=/ enable \
     gts9wifi-android-parts.service vendor.mount vendor-firmware_mnt.mount \
     vendor-dsp.mount mnt-vendor-persist.mount gts9wifi-wait-sensor-proxy.timer \
-    gts9wifi-audio-session.timer gts9wifi-panel-coldboot-recover.service \
-    getty@tty3.service \
+    gts9wifi-audio-session.timer getty@tty3.service \
     || return 1
 }
 
@@ -17,9 +16,8 @@ prepare_sensor_account() {
 
 post_install() {
   cat <<'NOTICE'
-x810-device-support installed. The X810 cold-boot panel recovery, delayed
-audio/sensor timers, VT3 text console, and read-only Android mounts are
-enabled. The panel recovery runs before GDM; audio/sensor work is deferred.
+x810-device-support installed. The delayed audio/sensor timers, VT3 text
+console, and read-only Android mounts are enabled. Audio/sensor work is deferred.
 NOTICE
   prepare_sensor_account && enable_device_units && systemctl daemon-reload
 }

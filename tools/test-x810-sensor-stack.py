@@ -48,19 +48,12 @@ class SensorStackTests(unittest.TestCase):
         self.assertIn("X810 AudioReach topology is missing", profile_script)
         self.assertIn("CS35L45 protection firmware is missing", profile_script)
 
-    def test_panel_coldboot_recovery_runs_before_gdm_and_keeps_console(self):
-        unit = read("usr/lib/systemd/system/gts9wifi-panel-coldboot-recover.service")
-        helper = read("usr/libexec/gts9wifi-panel-coldboot-recover")
+    def test_panel_coldboot_suspend_test_is_not_run_automatically(self):
         profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
         hook = (PACKAGE / "x810-device-support.install").read_text(encoding="utf-8")
-        self.assertIn("ConditionPathExists=/sys/power/pm_test", unit)
-        self.assertIn("Before=display-manager.service", unit)
-        self.assertIn("WantedBy=graphical.target", unit)
-        self.assertIn('echo platform > "$PM_TEST"', helper)
-        self.assertIn('echo mem > "$PM_STATE"', helper)
-        self.assertIn('echo none > "$PM_TEST"', helper)
-        self.assertIn("gts9wifi-panel-coldboot-recover.service", profile)
-        self.assertIn("gts9wifi-panel-coldboot-recover.service", hook)
+        self.assertNotIn("gts9wifi-panel-coldboot-recover", profile)
+        self.assertNotIn("gts9wifi-panel-coldboot-recover", hook)
+        self.assertNotIn("/sys/power/pm_test", profile + hook)
         self.assertIn("getty@tty3.service", profile)
 
     def test_unverified_suspend_targets_are_masked_for_x810(self):
