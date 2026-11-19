@@ -196,7 +196,7 @@ if count != 1:
 path.write_text(updated, encoding="utf-8")
 PY
 
-for package in x810-device-support zram-generator gdm gnome-shell gnome-session gnome-control-center \
+for package in x810-device-support zram-generator gdm gnome-shell gnome-session gnome-keyring gnome-control-center \
     gnome-terminal brave-bin bluez bluez-utils tuned-ppd dtc alsa-ucm-conf alsa-utils pipewire pipewire-audio \
     pipewire-alsa pipewire-jack pipewire-pulse wireplumber noto-fonts tab-companion; do
     "$script_dir/pacman-target.sh" --builder-mode -Q "$package" >/dev/null \
@@ -220,6 +220,17 @@ grep -q archarm "$rootfs/usr/local/libexec/x810-boot-switch-core" \
     || die "the installed dualboot backend does not recognize Arch Linux ARM"
 [[ -f "$rootfs/usr/lib/systemd/system/gdm.service" ]] \
     || die "GDM package did not install gdm.service"
+[[ -x "$rootfs/usr/bin/gnome-keyring-daemon" && \
+    -f "$rootfs/usr/share/dbus-1/services/org.freedesktop.secrets.service" && \
+    -f "$rootfs/usr/lib/security/pam_gnome_keyring.so" ]] \
+    || die "GNOME Keyring Secret Service or PAM integration is missing"
+grep -q 'pam_gnome_keyring.so' "$rootfs/usr/lib/pam.d/gdm-password" \
+    || die "GDM password PAM stack is missing GNOME Keyring unlock integration"
+grep -q 'pam_gnome_keyring.so auto_start' "$rootfs/usr/lib/pam.d/gdm-password" \
+    || die "GDM password PAM stack is missing GNOME Keyring auto-start integration"
+mkdir -p "$rootfs/etc/systemd/user/sockets.target.wants"
+ln -sfn /usr/lib/systemd/user/gnome-keyring-daemon.socket \
+    "$rootfs/etc/systemd/user/sockets.target.wants/gnome-keyring-daemon.socket"
 [[ -f "$rootfs/usr/lib/systemd/system/bluetooth.service" ]] \
     || die "BlueZ package did not install bluetooth.service"
 for unit in tuned.service tuned-ppd.service x810-thermal-limit.service gts9wifi-device-control.service \

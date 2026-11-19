@@ -17,6 +17,13 @@ def read(relative: str) -> str:
 
 
 class SensorStackTests(unittest.TestCase):
+    def test_gnome_keyring_is_installed_and_unlocked_by_gdm_pam(self):
+        profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
+        self.assertIn("gnome-keyring", profile)
+        self.assertIn("pam_gnome_keyring.so auto_start", profile)
+        self.assertIn("org.freedesktop.secrets.service", profile)
+        self.assertIn("gnome-keyring-daemon.socket", profile)
+
     def test_x810_audio_profile_and_wireplumber_routing_are_packaged(self):
         pkgbuild = (PACKAGE / "PKGBUILD").read_text(encoding="utf-8")
         for dependency in ("alsa-ucm-conf", "pipewire", "pipewire-audio", "pipewire-alsa",

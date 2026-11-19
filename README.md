@@ -22,6 +22,7 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 | Wi-Fi | ✅ | WCN6855/ath11k |
 | Bluetooth | ✅ | Mouse and earbuds tested working |
 | Speakers | ✅ | Built-in speakers play audio through the X810 AudioReach/UCM and PipeWire setup |
+| OS keyring | ✅ | GNOME Keyring Secret Service is installed, socket-activated, and integrated with GDM PAM |
 | Microphones | 🟡 | Same shared ALSA/UCM/ADSP path; Arch capture not yet verified |
 | Cameras | ✅ | Both cameras work |
 | Hardware video decode | ✅ | Verified working and recognizable by Moonlight |
