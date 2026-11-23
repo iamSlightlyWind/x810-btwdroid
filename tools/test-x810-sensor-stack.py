@@ -17,6 +17,12 @@ def read(relative: str) -> str:
 
 
 class SensorStackTests(unittest.TestCase):
+    def test_suspend_is_reported_unavailable_and_auto_brightness_defaults_off(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
+        self.assertRegex(readme, r"(?m)^\| Suspend / resume \| ❌ \|")
+        self.assertIn("Fedora applies the same mitigation", readme)
+
     def test_gnome_keyring_is_installed_and_unlocked_by_gdm_pam(self):
         profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
         self.assertIn("gnome-keyring", profile)

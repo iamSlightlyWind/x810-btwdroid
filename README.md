@@ -33,7 +33,7 @@ Status key: ✅ confirmed on the tablet · 🟡 partial, limited, or awaiting a 
 | USB-C / powered USB hub | ✅ | USB devices work |
 | External monitor | ✅ | HDMI/Type-C monitors work |
 | Haptics | ✅ | Physical tablet vibration works through the kernel haptics path |
-| Suspend / resume | ✅ | Suspend and wake work |
+| Suspend / resume | ❌ | Disabled: system sleep targets are masked because deep suspend has hung or failed UFS resume; Fedora applies the same mitigation |
 | Fingerprint reader | ❌ | Not working |
 | Charging bypass | ❌ | No safe, verified Linux control is available |
 
@@ -91,7 +91,8 @@ service status is enabled. A text login is available on VT3
 (`Ctrl`+`Alt`+`F3`) without disabling GDM;
 switch back to GNOME with `Ctrl`+`Alt`+`F1` or `F2`.
 
-System sleep targets are masked on the X810 until its deep-suspend resume path
-is fixed. A failed resume previously timed out initializing the UFS PHY and
-forced the root filesystem read-only; automatic suspend would therefore cause
-I/O stalls and data-loss risk.
+System sleep targets are masked on both Arch and Fedora until the X810 deep-
+suspend resume path is fixed and physically validated. A prior failed resume
+timed out initializing the UFS PHY and forced the root filesystem read-only.
+Fedora has an opt-in, unvalidated IPCC IRQ candidate, not a released suspend
+fix; do not unmask sleep targets based on that candidate.
