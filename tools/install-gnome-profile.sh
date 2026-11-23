@@ -153,12 +153,19 @@ glib-compile-schemas "$rootfs/usr/share/glib-2.0/schemas"
 [[ -s "$rootfs/etc/systemd/system.conf.d/90-x810-boot-logs.conf" ]] \
     || die "systemd boot progress policy is missing from x810-device-support"
 [[ -s "$rootfs/etc/systemd/logind.conf.d/10-gts9wifi-lid.conf" ]] \
-    || die "X810 no-suspend policy is missing from x810-device-support"
-for target in sleep.target suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target; do
+    || die "X810 suspend policy is missing from x810-device-support"
+for target in hibernate.target hybrid-sleep.target suspend-then-hibernate.target; do
     [[ -L "$rootfs/etc/systemd/system/$target" && \
         "$(readlink "$rootfs/etc/systemd/system/$target")" == /dev/null ]] \
         || die "unsafe systemd sleep target is not masked: $target"
 done
+for target in sleep.target suspend.target; do
+    [[ ! -e "$rootfs/etc/systemd/system/$target" && ! -L "$rootfs/etc/systemd/system/$target" ]] \
+        || die "explicit suspend must remain available: $target is masked"
+done
+grep -Fq 'MemorySleepMode=s2idle' \
+    "$rootfs/usr/lib/systemd/sleep.conf.d/10-x810-suspend.conf" \
+    || die "X810 suspend must default to s2idle"
 [[ -s "$rootfs/usr/share/gnome-shell/extensions/dualboot@agcarbajo.github.io/metadata.json" ]] \
     || die "Arch dualboot extension metadata was not installed"
 

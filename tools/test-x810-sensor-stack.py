@@ -20,8 +20,8 @@ class SensorStackTests(unittest.TestCase):
     def test_suspend_is_reported_unavailable_and_auto_brightness_defaults_off(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
-        self.assertRegex(readme, r"(?m)^\| Suspend / resume \| ❌ \|")
-        self.assertIn("Fedora applies the same mitigation", readme)
+        self.assertRegex(readme, r"(?m)^\| Suspend / resume \| 🟡 \|")
+        self.assertIn("Fedora keeps all system sleep targets masked", readme)
 
     def test_gnome_keyring_is_installed_and_unlocked_by_gdm_pam(self):
         profile = (ROOT / "tools/install-gnome-profile.sh").read_text(encoding="utf-8")
@@ -86,8 +86,6 @@ class SensorStackTests(unittest.TestCase):
         self.assertIn("HandleLidSwitch=ignore", policy)
         self.assertIn("HoldoffTimeoutSec=0", policy)
         for target in (
-            "sleep.target",
-            "suspend.target",
             "hibernate.target",
             "hybrid-sleep.target",
             "suspend-then-hibernate.target",
@@ -95,6 +93,9 @@ class SensorStackTests(unittest.TestCase):
             mask = package / "etc/systemd/system" / target
             self.assertTrue(mask.is_symlink(), f"missing systemd mask: {mask}")
             self.assertEqual(mask.readlink(), Path("/dev/null"))
+        for target in ("sleep.target", "suspend.target"):
+            self.assertFalse((package / "etc/systemd/system" / target).exists())
+        self.assertIn("MemorySleepMode=s2idle", read("usr/lib/systemd/sleep.conf.d/10-x810-suspend.conf"))
         self.assertIn("systemctl daemon-reload", (PACKAGE / "x810-device-support.install").read_text())
 
     def test_android_logical_partition_mapping_is_verified_read_only(self):
