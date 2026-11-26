@@ -252,6 +252,7 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn("write_kernel_receipt", builder)
         self.assertIn("test-x810-pps-refresh-timing.py", builder)
         self.assertIn("verify-x810-arch-kernel-payload.py", builder)
+        self.assertIn("apply-arm64-u128-backport.py", builder)
         self.assertIn("PPS bus did not settle", verifier)
         self.assertNotIn("same-point PPS keep-alive completed without parking pump", verifier)
         self.assertIn("kernel_commit=", lock)

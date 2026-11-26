@@ -63,6 +63,7 @@ docker run --rm \
   -e CCACHE_DIR=/x810-cache/ccache -e CCACHE_COMPILERCHECK=content -e CCACHE_MAXSIZE=6G \
   -v "$kernel_source:/upstream:ro" \
   -v "$firmware_source:/firmware-source:ro" \
+  -v "$project_dir/tools/apply-arm64-u128-backport.py:/x810-tools/apply-arm64-u128-backport.py:ro" \
   -v "$project_dir/tools/verify-x810-arch-kernel-payload.py:/x810-tools/verify-x810-arch-kernel-payload.py:ro" \
   -v "$cache:/x810-cache:rw" \
   -v "$output_dir:/kernel-output:rw" \
@@ -105,6 +106,7 @@ docker run --rm \
       drivers/gpu/drm/display/drm_bridge_connector.c
     python3 /upstream/tools/test-x810-pps-refresh-timing.py
     bash /upstream/kernel/prepare.sh .
+    python3 /x810-tools/apply-arm64-u128-backport.py tools/include/linux/types.h
     echo "-gts9wifi" > localversion-gts9wifi
     cd ..
     mv linux-7.2 linux-prepared

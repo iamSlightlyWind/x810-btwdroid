@@ -147,10 +147,12 @@ jobs:
           python3 tools/test-x810-sensor-stack.py
           python3 tools/test-verify-rootfs-archive.py
           python3 tools/test-verify-x810-arch-kernel-payload.py
+          python3 tools/test-apply-arm64-u128-backport.py
           python3 tools/test-tab-companion-overlay.py
           python3 tools/test-arch-port-release.py
           python3 tools/test-x810-workflow.py
           python3 tools/test-verify-x810-arch-kernel-payload.py
+          python3 tools/test-apply-arm64-u128-backport.py
 
       - name: Stage port version and this push's build identity
         run: |
@@ -508,6 +510,8 @@ jobs:
         run: |
           set -euo pipefail
           bash -n tools/build-x810-kernel.sh
+          python3 tools/test-apply-arm64-u128-backport.py
+          python3 tools/test-verify-x810-arch-kernel-payload.py
           tools/build-x810-kernel.sh out/kernel-build
           mkdir -p _ci/kernel
           cp out/kernel-build/transfer/* _ci/kernel/
