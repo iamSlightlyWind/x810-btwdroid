@@ -63,6 +63,7 @@ docker run --rm \
   -e CCACHE_DIR=/x810-cache/ccache -e CCACHE_COMPILERCHECK=content -e CCACHE_MAXSIZE=6G \
   -v "$kernel_source:/upstream:ro" \
   -v "$firmware_source:/firmware-source:ro" \
+  -v "$project_dir/tools/verify-x810-arch-kernel-payload.py:/x810-tools/verify-x810-arch-kernel-payload.py:ro" \
   -v "$cache:/x810-cache:rw" \
   -v "$output_dir:/kernel-output:rw" \
   quay.io/fedora/fedora:44 bash -lc '
@@ -102,6 +103,7 @@ docker run --rm \
       drivers/gpu/drm/msm/disp/dpu1/dpu_crtc.c drivers/gpu/drm/msm/msm_atomic.c
     python3 /upstream/tools/test-drm-bridge-oob-hotplug.py \
       drivers/gpu/drm/display/drm_bridge_connector.c
+    python3 /upstream/tools/test-x810-pps-refresh-timing.py
     bash /upstream/kernel/prepare.sh .
     echo "-gts9wifi" > localversion-gts9wifi
     cd ..
@@ -134,8 +136,9 @@ docker run --rm \
       --dtb /boot/dtbs-7.2.0-gts9wifi/qcom/sm8550-samsung-gts9wifi.dtb \
       --initramfs /tmp/initramfs.img --cmdline /upstream/boot/cmdline.txt \
       --bootconfig /upstream/boot/bootconfig.txt --out /kernel-output/boot
-    python3 /upstream/tools/verify-x810-kernel-payload.py \
-      "/boot/vmlinuz-$KVER" /upstream/kernel/files/samsung_stm32_pogo.c
+    python3 /x810-tools/verify-x810-arch-kernel-payload.py \
+      "/boot/vmlinuz-$KVER" /upstream/kernel/files/samsung_stm32_pogo.c \
+      /upstream/boot/extract-zboot-payload.py
     python3 /upstream/tools/x810-gpu-firmware.py check-vendor-boot /kernel-output/boot/vendor_boot.img
     ccache --show-stats
   '

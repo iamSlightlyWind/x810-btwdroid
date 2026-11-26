@@ -246,12 +246,17 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn("actions/cache/save@", kernel)
         self.assertNotIn("fetch-x810-kernel.py", kernel)
         builder = (ROOT / "tools/build-x810-kernel.sh").read_text(encoding="utf-8")
+        verifier = (ROOT / "tools/verify-x810-arch-kernel-payload.py").read_text(encoding="utf-8")
         lock = (ROOT / "kernel/SOURCE.lock").read_text(encoding="utf-8")
         self.assertIn('"${cfg[kernel_commit]}"', builder)
         self.assertIn("write_kernel_receipt", builder)
-        self.assertIn("--verify-prepared", builder)
+        self.assertIn("test-x810-pps-refresh-timing.py", builder)
+        self.assertIn("verify-x810-arch-kernel-payload.py", builder)
+        self.assertIn("PPS bus did not settle", verifier)
+        self.assertNotIn("same-point PPS keep-alive completed without parking pump", verifier)
         self.assertIn("kernel_commit=", lock)
         self.assertIn("kernel_release=7.2.0-gts9wifi", lock)
+        self.assertIn("fedora_updates_compose=Fedora-44-updates-20261126.0", lock)
 
     def test_complete_release_includes_tab_companion_update_and_prunes_only_after_validation(self):
         publish = self.text.split("  publish_full_set:\n", 1)[1].split("  prune_old_releases:\n", 1)[0]
