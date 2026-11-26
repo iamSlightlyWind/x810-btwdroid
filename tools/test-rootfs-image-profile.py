@@ -234,6 +234,7 @@ class RootfsImageProfileTests(unittest.TestCase):
             "gnome-shell",
             "gnome-session",
             "gdm",
+            "gnome-keyring",
             "gnome-control-center",
             "pipewire-jack",
             "noto-fonts",

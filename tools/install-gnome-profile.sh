@@ -97,6 +97,7 @@ desktop_packages=(
     gnome-shell
     gnome-session
     gdm
+    gnome-keyring
     gnome-control-center
     gnome-terminal
     bluez
