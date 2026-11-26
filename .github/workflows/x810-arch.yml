@@ -10,6 +10,7 @@ on:
       - "rootfs/**"
       - "docs/**"
       - "packages/**"
+      - "kernel/**"
       - "tools/**"
       - ".gitignore"
       - ".github/workflows/x810-arch.yml"
@@ -74,7 +75,7 @@ jobs:
             # Manual runs refresh an aggregate only if all release-affecting
             # source is identical to its successful push identity.
             git diff --quiet "$commit" "$GITHUB_SHA" -- \
-              PORT_VERSION README.md LICENSE rootfs docs packages tools .gitignore .github/workflows/x810-arch.yml || {
+              PORT_VERSION README.md LICENSE rootfs docs packages kernel tools .gitignore .github/workflows/x810-arch.yml || {
               echo "Release inputs changed since the last successful push. Push and complete the normal build before running a manual rebuild." >&2
               exit 1
             }
@@ -325,13 +326,28 @@ jobs:
             if [[ "$latest_tag" == "$release_tag" ]]; then
               check_dir="$RUNNER_TEMP/arch-release-reuse-$GITHUB_RUN_ID"
               mkdir -p "$check_dir"
-              python3 tools/fetch-x810-kernel.py --identity-only > "$check_dir/upstream-kernel.json"
+              python3 - "$check_dir/kernel-source.json" <<'PY'
+          import json
+          from pathlib import Path
+          lock = {}
+          for raw in Path("kernel/SOURCE.lock").read_text(encoding="utf-8").splitlines():
+              line = raw.partition("#")[0].strip()
+              if line:
+                  key, sep, value = line.partition("=")
+                  if not sep or key in lock:
+                      raise SystemExit("invalid kernel/SOURCE.lock")
+                  lock[key] = value
+          Path(__import__("sys").argv[1]).write_text(json.dumps({
+              "source_commit": lock.get("kernel_commit"),
+              "kernel_release": lock.get("kernel_release"),
+          }), encoding="utf-8")
+          PY
               if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$latest_tag" \
                     > "$check_dir/github-release.json" 2>/dev/null && \
                  gh release download "$latest_tag" --repo "$GITHUB_REPOSITORY" --dir "$check_dir" \
                     --pattern manifest.json --pattern SHA256SUMS >/dev/null 2>&1; then
                 if python3 - "$check_dir/manifest.json" "$check_dir/github-release.json" \
-                    "$check_dir/SHA256SUMS" "$check_dir/upstream-kernel.json" \
+                    "$check_dir/SHA256SUMS" "$check_dir/kernel-source.json" \
                     "$release_tag" "$SOURCE_COMMIT" <<'PY'
           import hashlib
           import json
@@ -339,12 +355,12 @@ jobs:
           import sys
           from pathlib import Path
 
-          manifest_path, release_path, sums_path, upstream_path, tag, commit = sys.argv[1:]
-          manifest_file, release_file, sums_file, upstream_file = map(
-              Path, (manifest_path, release_path, sums_path, upstream_path))
+          manifest_path, release_path, sums_path, source_path, tag, commit = sys.argv[1:]
+          manifest_file, release_file, sums_file, source_file = map(
+              Path, (manifest_path, release_path, sums_path, source_path))
           manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
           release = json.loads(release_file.read_text(encoding="utf-8"))
-          upstream_kernel = json.loads(upstream_file.read_text(encoding="utf-8"))
+          expected_kernel = json.loads(source_file.read_text(encoding="utf-8"))
           if (not isinstance(manifest, dict) or isinstance(manifest.get("schema_version"), bool)
                   or manifest.get("schema_version") != 1
                   or manifest.get("type") != "x810-arch-release"
@@ -362,9 +378,12 @@ jobs:
           boot = kernel.get("boot_images") if isinstance(kernel, dict) else None
           kernel_identity_fields = (
               "repository", "release_tag", "source_commit", "kernel_release", "kernel_rpm", "boot_images")
-          if not isinstance(kernel, dict) or any(
-                  kernel.get(field) != upstream_kernel.get(field) for field in kernel_identity_fields):
-              raise SystemExit("latest X810 kernel release differs from the Arch release; rebuilding")
+          if (not isinstance(kernel, dict)
+                  or kernel.get("source_commit") != expected_kernel.get("source_commit")
+                  or kernel.get("kernel_release") != expected_kernel.get("kernel_release")
+                  or not isinstance(kernel.get("boot_images"), dict)
+                  or not isinstance(kernel.get("kernel_rpm"), dict)):
+              raise SystemExit("latest Arch release does not use the pinned kernel source; rebuilding")
           expected_sizes = {"boot": 100663296, "init_boot": 8388608,
                             "vendor_boot": 100663296, "dtbo": 16777216}
           if not isinstance(boot, dict) or set(boot) != set(expected_sizes):
@@ -449,44 +468,67 @@ jobs:
             if [[ "$reuse_release" == true ]]; then
               echo "- Complete release: inputs and checksums match the latest published release; **reuse \`$release_tag\` and skip every build**."
             else
-              echo "- Complete release: no verified match (or rebuild requested); build the updater and rootfs."
+              echo "- Complete release: no verified match (or rebuild requested); build the updater, kernel, and rootfs."
               echo "- Rootfs: rebuild from the pinned Arch Linux ARM bootstrap because Arch repositories are rolling."
             fi
-            echo "- Kernel modules: resolve and verify the exact X810 module tree from the public kernel release."
+            echo "- Kernel: build the pinned X810 kernel source and matching boot images/modules from kernel/SOURCE.lock."
             echo "- Release tag: \`$release_tag\` (keyed to the successful push identity for Tab Companion)."
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # Arch consumes the verified public X810 kernel release instead of building
-  # its own kernel. The planner checks upstream kernel identity before reuse,
-  # and this stage hands the matching modules and boot images to rootfs build.
-  prepare_kernel_modules:
+  # Build the pinned X810 kernel source and its matching boot images/modules;
+  # this avoids depending on an unrelated Fedora release asset.
+  build_kernel:
     needs: plan
     if: needs.plan.outputs.reuse_release != 'true'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    env:
-      GH_TOKEN: ${{ github.token }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
     steps:
       - name: Check out release tools
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
+      - name: Restore pinned kernel source, compiler and DNF caches
+        id: restore_kernel_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: cache/kernel-build
+          key: x810-arch-kernel-${{ runner.arch }}-${{ hashFiles('kernel/SOURCE.lock') }}
+          restore-keys: |
+            x810-arch-kernel-${{ runner.arch }}-
+
       - name: Install kernel RPM extraction tools
         run: |
           sudo apt-get update
           sudo apt-get install --yes cpio rpm
 
-      - name: Download and verify the public X810 kernel RPM
+      - name: Build and verify the pinned X810 kernel and boot set
         run: |
           set -euo pipefail
-          python3 tools/fetch-x810-kernel.py --receipt cache/public-kernel/kernel.json
-          python3 tools/fetch-x810-kernel.py --receipt cache/public-kernel/kernel.json --verify-prepared
+          bash -n tools/build-x810-kernel.sh
+          tools/build-x810-kernel.sh out/kernel-build
           mkdir -p _ci/kernel
-          cp cache/public-kernel/kernel.json _ci/kernel/kernel.json
-          tar -C cache/public-kernel/usr/lib/modules -czf _ci/kernel/modules.tar.gz "$KVER"
-          tar -C cache/public-kernel -czf _ci/kernel/boot-images.tar.gz boot
-          (cd _ci/kernel && sha256sum kernel.json modules.tar.gz boot-images.tar.gz > SHA256SUMS)
+          cp out/kernel-build/transfer/* _ci/kernel/
+
+      - name: Finalize kernel cache after build attempt
+        id: finalize_kernel_cache
+        if: ${{ always() && !cancelled() }}
+        run: |
+          set -euo pipefail
+          mkdir -p cache/kernel-build
+          find cache/kernel-build -type f \( -name '*.partial' -o -name '*.tmp' \) -delete
+          if find cache/kernel-build -type f -print -quit | grep -q .; then
+            echo "has_cache=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cache=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Save kernel source, compiler and DNF caches
+        if: ${{ always() && !cancelled() && steps.restore_kernel_cache.outputs.cache-hit != 'true' && steps.finalize_kernel_cache.outcome == 'success' && steps.finalize_kernel_cache.outputs.has_cache == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: cache/kernel-build
+          key: x810-arch-kernel-${{ runner.arch }}-${{ hashFiles('kernel/SOURCE.lock') }}
 
       - name: Hand the verified module artifact to the rootfs job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (Node.js 24)
@@ -498,11 +540,11 @@ jobs:
           compression-level: 0
 
   resolve_rootfs:
-    needs: [plan, prepare_kernel_modules]
+    needs: [plan, build_kernel]
     if: >-
       always() && needs.plan.result == 'success' &&
       needs.plan.outputs.reuse_release != 'true' &&
-      needs.prepare_kernel_modules.result == 'success'
+      needs.build_kernel.result == 'success'
     runs-on: ubuntu-24.04
     outputs:
       rootfs_key: ${{ steps.resolve.outputs.rootfs_key }}
@@ -527,19 +569,23 @@ jobs:
           SOURCE_COMMIT: ${{ needs.plan.outputs.source_commit }}
         run: |
           set -euo pipefail
+          expected_kernel_commit="$(sed -n 's/^kernel_commit=//p' kernel/SOURCE.lock)"
+          [[ "$expected_kernel_commit" =~ ^[0-9a-f]{40}$ ]]
           (cd _ci/kernel && sha256sum --check SHA256SUMS)
-          python3 - _ci/kernel/kernel.json <<'PY'
+          python3 - _ci/kernel/kernel.json "$expected_kernel_commit" <<'PY'
           import json
           import re
           import sys
           from pathlib import Path
 
           receipt = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected_commit = sys.argv[2]
           if (receipt.get("schema_version") != 1
                   or receipt.get("repository") != "iamSlightlyWind/x810-fedroid"
                   or receipt.get("kernel_release") != "7.2.0-gts9wifi"
+                  or receipt.get("source_commit") != expected_commit
                   or not re.fullmatch(r"[0-9a-f]{40,64}", str(receipt.get("source_commit", "")))):
-              raise SystemExit("kernel input receipt does not identify a verified X810 release")
+              raise SystemExit("kernel input receipt does not match the pinned X810 source")
           if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("kernel_rpm", {}).get("sha256", ""))):
               raise SystemExit("kernel RPM digest is missing from the receipt")
           if not re.fullmatch(r"[0-9a-f]{64}", str(receipt.get("modules", {}).get("sha256", ""))):
@@ -559,15 +605,15 @@ jobs:
             echo "### Resolved Arch rootfs inputs"
             echo "- Rootfs key: \`$rootfs_key\` (source commit including package recipes, kernel receipt and signed bootstrap lock; rolling repository transaction is intentionally not claimed reproducible)."
             echo "- Rootfs action: **build** \`$RELEASE_TAG\`."
-            echo "- Matching X810 kernel modules: \`$kernel_tag\`."
+            echo "- Matching X810 kernel/modules and boot bundle: \`$kernel_tag\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
   build_rootfs:
-    needs: [plan, prepare_kernel_modules, resolve_rootfs]
+    needs: [plan, build_kernel, resolve_rootfs]
     if: >-
       always() && needs.plan.result == 'success' &&
       needs.plan.outputs.reuse_release != 'true' &&
-      needs.prepare_kernel_modules.result == 'success' &&
+      needs.build_kernel.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
       needs.resolve_rootfs.outputs.build_rootfs == 'true'
     runs-on: ubuntu-24.04
@@ -641,13 +687,13 @@ jobs:
             cache/ArchLinuxARM-aarch64-latest.tar.gz.sig
           key: x810-alarm-bootstrap-${{ runner.arch }}-${{ hashFiles('docs/ALARM-ROOTFS.lock') }}-v1
 
-      - name: Download the exact X810 kernel module artifact
+      - name: Download the exact X810 kernel build artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (Node.js 24)
         with:
           name: x810-arch-kernel-modules
           path: _ci/kernel
 
-      - name: Verify and stage the exact upstream kernel-module artifact
+      - name: Verify and stage the exact pinned kernel artifact
         run: |
           set -euo pipefail
           (cd _ci/kernel && sha256sum --check SHA256SUMS)
@@ -743,12 +789,12 @@ jobs:
           compression-level: 0
 
   publish_full_set:
-    needs: [plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs]
+    needs: [plan, build_port_update, build_kernel, resolve_rootfs, build_rootfs]
     if: >-
       always() && needs.plan.result == 'success' &&
       needs.build_port_update.result == 'success' &&
       needs.plan.outputs.reuse_release != 'true' &&
-      needs.prepare_kernel_modules.result == 'success' &&
+      needs.build_kernel.result == 'success' &&
       needs.resolve_rootfs.result == 'success' &&
       needs.build_rootfs.result == 'success' &&
       needs.resolve_rootfs.outputs.build_rootfs == 'true'
@@ -794,7 +840,7 @@ jobs:
         run: bash tools/publish-arch-full-set.sh
 
   prune_old_releases:
-    needs: [publication_identity, plan, build_port_update, prepare_kernel_modules, resolve_rootfs, build_rootfs, publish_full_set]
+    needs: [publication_identity, plan, build_port_update, build_kernel, resolve_rootfs, build_rootfs, publish_full_set]
     if: always() && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:

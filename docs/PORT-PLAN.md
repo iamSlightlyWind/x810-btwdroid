@@ -9,23 +9,24 @@ does not install a generic kernel. The installer formats only the existing
 
 `rootfs/build-rootfs.sh` is the single local build entry point. The GitHub
 workflow uses the shared multi-stage graph: `publication_identity`,
-`build_port_update`, `plan`, kernel component preparation, `resolve_rootfs`,
+`build_port_update`, `plan`, `build_kernel`, `resolve_rootfs`,
 `build_rootfs`, `publish_full_set`, then `prune_old_releases`. The updater job
 runs the contract tests, builds Arch packages, and hands off `update.zip`.
 Independently, the rootfs job builds its own package copies and consumes the
-separately verified X810 kernel-module artifact; it does not wait for the
-updater job. Arch consumes the published X810 kernel release rather than
-building its own kernel. The planner verifies that a reusable Arch release
-still matches the latest upstream kernel RPM and all four boot-image hashes;
-a kernel release change forces a new Arch release. Because Arch repositories
-roll, every rootfs is freshly built rather than reused from a source-only
-fingerprint.
+separately verified X810 kernel/module/boot artifact; it does not wait for the
+updater job. `build_kernel` builds the source commit pinned in
+`kernel/SOURCE.lock`, producing matching boot images and modules without
+depending on another distro's release assets. The planner verifies that a
+reusable Arch release matches that pinned kernel commit and all four boot-image
+hashes. Because Arch repositories roll, every rootfs is freshly built rather
+than reused from a source-only fingerprint.
 
 GitHub Actions uses separate restore/save caches:
 the signed bootstrap is keyed by `ALARM-ROOTFS.lock`, builder package archives
 and makepkg sources are cached per independent build job, and verified pacman
-package archives are cached for rolling-rootfs transactions. The rolling
-cache is mounted outside `work/rootfs`; every image runs a full `pacman -Syu`
+package archives are cached for rolling-rootfs transactions. The kernel job
+caches its pinned source, compiler objects and build dependencies separately.
+The rolling cache is mounted outside `work/rootfs`; every image runs a full `pacman -Syu`
 with signature checking, then prunes cached archives not matching installed
 packages. Repository sync data and any bootstrap-local package cache are
 removed from the staged image before audit. The rootfs itself is never reused

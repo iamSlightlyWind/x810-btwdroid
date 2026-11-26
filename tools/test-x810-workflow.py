@@ -25,7 +25,7 @@ class ArchWorkflowTests(unittest.TestCase):
             "publication_identity",
             "build_port_update",
             "plan",
-            "prepare_kernel_modules",
+            "build_kernel",
             "resolve_rootfs",
             "build_rootfs",
             "publish_full_set",
@@ -43,7 +43,7 @@ class ArchWorkflowTests(unittest.TestCase):
             "prune_old_releases",
         )
         self.assertEqual(
-            ["prepare_kernel_modules" if job == "build_kernel" else job for job in fedora_jobs],
+            ["build_kernel" if job == "build_kernel" else job for job in fedora_jobs],
             list(expected),
         )
         self.assertIn("build_port_update:\n    needs: [publication_identity, plan]", self.text)
@@ -65,7 +65,7 @@ class ArchWorkflowTests(unittest.TestCase):
         arch_identity = arch_identity.replace("x810-arch.yml", "WORKFLOW.yml")
         # These are deliberately the only workflow-specific release-input paths.
         arch_identity = arch_identity.replace(
-            "PORT_VERSION README.md LICENSE rootfs docs packages tools .gitignore .github/workflows/WORKFLOW.yml",
+            "PORT_VERSION README.md LICENSE rootfs docs packages kernel tools .gitignore .github/workflows/WORKFLOW.yml",
             "PORT_VERSION kernel boot rootfs specs tools .github/workflows/WORKFLOW.yml",
         )
         if fedora is not None:
@@ -118,7 +118,7 @@ class ArchWorkflowTests(unittest.TestCase):
             self.assertIn("needs.build_port_update.result == 'success'", publish)
 
     def test_unchanged_manual_run_reuses_latest_complete_release_without_building(self):
-        plan = self.text.split("  plan:\n", 1)[1].split("  prepare_kernel_modules:\n", 1)[0]
+        plan = self.text.split("  plan:\n", 1)[1].split("  build_kernel:\n", 1)[0]
         self.assertIn("reuse_release: ${{ steps.plan.outputs.reuse_release }}", plan)
         self.assertIn('FORCE_REBUILD: ${{ inputs.rebuild || false }}', plan)
         self.assertIn('if [[ "$FORCE_REBUILD" != true ]]', plan)
@@ -126,9 +126,10 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn('manifest.get("source_commit") != commit', plan)
         self.assertIn('manifest.get("build_inputs_key", "")', plan)
         self.assertIn('boot = kernel.get("boot_images")', plan)
-        self.assertIn("--identity-only", plan)
-        self.assertIn('kernel.get(field) != upstream_kernel.get(field)', plan)
-        self.assertIn('"source_commit", "kernel_release", "kernel_rpm", "boot_images"', plan)
+        self.assertIn('kernel/SOURCE.lock', plan)
+        self.assertIn('kernel.get("source_commit") != expected_kernel.get("source_commit")', plan)
+        self.assertIn('kernel.get("kernel_release") != expected_kernel.get("kernel_release")', plan)
+        self.assertNotIn("--identity-only", plan)
         self.assertIn('releases/tags/$latest_tag', plan)
         self.assertIn('api_by_name[name]["digest"]', plan)
         self.assertIn('--pattern manifest.json --pattern SHA256SUMS', plan)
@@ -137,11 +138,11 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn(r'echo "- Complete release: inputs and checksums match the latest published release; **reuse \`$release_tag\`', plan)
         self.assertIn("reuse_release=true", plan)
         self.assertIn("skip every build", plan)
-        for job in ("build_port_update", "prepare_kernel_modules", "resolve_rootfs", "build_rootfs", "publish_full_set"):
+        for job in ("build_port_update", "build_kernel", "resolve_rootfs", "build_rootfs", "publish_full_set"):
             block = self.text.split(f"  {job}:\n", 1)[1]
             if job == "build_port_update":
                 block = block.split("  plan:\n", 1)[0]
-            elif job == "prepare_kernel_modules":
+            elif job == "build_kernel":
                 block = block.split("  resolve_rootfs:\n", 1)[0]
             elif job == "resolve_rootfs":
                 block = block.split("  build_rootfs:\n", 1)[0]
@@ -181,8 +182,8 @@ class ArchWorkflowTests(unittest.TestCase):
     def test_rootfs_is_independent_of_the_port_update_job(self):
         resolve = self.text.split("  resolve_rootfs:\n", 1)[1].split("  build_rootfs:\n", 1)[0]
         build = self.text.split("  build_rootfs:\n", 1)[1].split("  publish_full_set:\n", 1)[0]
-        self.assertIn("needs: [plan, prepare_kernel_modules]", resolve)
-        self.assertIn("needs: [plan, prepare_kernel_modules, resolve_rootfs]", self.text)
+        self.assertIn("needs: [plan, build_kernel]", resolve)
+        self.assertIn("needs: [plan, build_kernel, resolve_rootfs]", self.text)
         self.assertNotIn("build_port_update", resolve)
         self.assertNotIn("build_port_update", build)
         self.assertNotIn("x810-arch-packages", resolve)
@@ -236,12 +237,21 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn('X810_PREBUILT_KERNEL_MODULES: "1"', build)
         self.assertIn("Arch repositories are rolling", self.text)
 
-    def test_kernel_release_api_uses_authenticated_workflow_quota(self):
-        prepare = self.text.split("  prepare_kernel_modules:\n", 1)[1].split("  resolve_rootfs:\n", 1)[0]
-        self.assertIn("GH_TOKEN: ${{ github.token }}", prepare)
-        fetcher = (ROOT / "tools/fetch-x810-kernel.py").read_text(encoding="utf-8")
-        self.assertIn('os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")', fetcher)
-        self.assertIn('headers["Authorization"] = f"Bearer {token}"', fetcher)
+    def test_kernel_job_builds_locked_source_and_caches_reproducible_inputs(self):
+        kernel = self.text.split("  build_kernel:\n", 1)[1].split("  resolve_rootfs:\n", 1)[0]
+        self.assertIn("runs-on: ubuntu-24.04-arm", kernel)
+        self.assertIn("tools/build-x810-kernel.sh out/kernel-build", kernel)
+        self.assertIn("cache/kernel-build", kernel)
+        self.assertIn("actions/cache/restore@", kernel)
+        self.assertIn("actions/cache/save@", kernel)
+        self.assertNotIn("fetch-x810-kernel.py", kernel)
+        builder = (ROOT / "tools/build-x810-kernel.sh").read_text(encoding="utf-8")
+        lock = (ROOT / "kernel/SOURCE.lock").read_text(encoding="utf-8")
+        self.assertIn('"${cfg[kernel_commit]}"', builder)
+        self.assertIn("write_kernel_receipt", builder)
+        self.assertIn("--verify-prepared", builder)
+        self.assertIn("kernel_commit=", lock)
+        self.assertIn("kernel_release=7.2.0-gts9wifi", lock)
 
     def test_complete_release_includes_tab_companion_update_and_prunes_only_after_validation(self):
         publish = self.text.split("  publish_full_set:\n", 1)[1].split("  prune_old_releases:\n", 1)[0]

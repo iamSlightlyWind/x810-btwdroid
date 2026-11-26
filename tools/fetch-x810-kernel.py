@@ -370,13 +370,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receipt", type=Path, default=cache / "kernel.json")
     parser.add_argument("--verify-prepared", action="store_true",
                         help="verify the cached receipt and module tree without network access")
+    parser.add_argument("--prepared-root", type=Path, default=cache,
+                        help="root containing usr/lib/modules and boot for --verify-prepared")
     parser.add_argument("--identity-only", action="store_true",
                         help="print verified latest upstream kernel identity without downloading large assets")
     args = parser.parse_args(argv)
     try:
         if args.verify_prepared:
             receipt = validate_kernel_receipt(
-                args.receipt, cache / "usr/lib/modules" / KERNEL_RELEASE,
+                args.receipt, args.prepared_root / "usr/lib/modules" / KERNEL_RELEASE,
             )
             print(f"Verified prepared X810 kernel modules from {receipt['release_tag']}.")
             return 0

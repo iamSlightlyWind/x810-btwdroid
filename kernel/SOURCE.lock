@@ -1,0 +1,10 @@
+format=1
+kernel_repository=https://github.com/iamSlightlyWind/x810-fedroid.git
+kernel_commit=68258a3d796c6884785514002d08563fd57edd40
+firmware_repository=https://github.com/Azkali/gts9wifi-firmware.git
+firmware_commit=3f6fff46e09fa359005653c2027d12525ec192ee
+kernel_release=7.2.0-gts9wifi
+linux_source_url=https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.tar.xz
+linux_source_sha256=f9fef3d14c0df53819026f4be74459835c2a0b0dcbf5b5bbd9ea19f0829402b3
+fedora_base_compose=Fedora-44-20260422.1
+fedora_updates_compose=Fedora-44-updates-20261101.0
