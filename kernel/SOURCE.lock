@@ -1,6 +1,6 @@
 format=1
 kernel_repository=https://github.com/iamSlightlyWind/x810-fedroid.git
-kernel_commit=b8cb451981ada7a3be7fcb9768568525e69bc416
+kernel_commit=6ca0571e70e8dbfb1a8246f6698fd2481bd70d9a
 firmware_repository=https://github.com/Azkali/gts9wifi-firmware.git
 firmware_commit=3f6fff46e09fa359005653c2027d12525ec192ee
 kernel_release=7.2.0-gts9wifi
