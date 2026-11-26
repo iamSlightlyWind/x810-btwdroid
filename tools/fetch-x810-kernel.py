@@ -43,6 +43,21 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def github_api_headers() -> dict[str, str]:
+    """Use the workflow token for API quota; do not attach it to release URLs."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": USER_AGENT,
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        if "\n" in token or "\r" in token:
+            raise RuntimeError("GitHub API token contains invalid newline characters")
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -138,10 +153,7 @@ def validate_kernel_receipt(path: Path, module_root: Path) -> dict[str, Any]:
 
 
 def fetch_json(url: str, opener=urllib.request.urlopen) -> dict[str, Any]:
-    request = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": USER_AGENT,
-    })
+    request = urllib.request.Request(url, headers=github_api_headers())
     try:
         with opener(request, timeout=60) as response:
             payload = response.read(16 * 1024 * 1024 + 1)

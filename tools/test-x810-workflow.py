@@ -236,6 +236,13 @@ class ArchWorkflowTests(unittest.TestCase):
         self.assertIn('X810_PREBUILT_KERNEL_MODULES: "1"', build)
         self.assertIn("Arch repositories are rolling", self.text)
 
+    def test_kernel_release_api_uses_authenticated_workflow_quota(self):
+        prepare = self.text.split("  prepare_kernel_modules:\n", 1)[1].split("  resolve_rootfs:\n", 1)[0]
+        self.assertIn("GH_TOKEN: ${{ github.token }}", prepare)
+        fetcher = (ROOT / "tools/fetch-x810-kernel.py").read_text(encoding="utf-8")
+        self.assertIn('os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")', fetcher)
+        self.assertIn('headers["Authorization"] = f"Bearer {token}"', fetcher)
+
     def test_complete_release_includes_tab_companion_update_and_prunes_only_after_validation(self):
         publish = self.text.split("  publish_full_set:\n", 1)[1].split("  prune_old_releases:\n", 1)[0]
         prune = self.text.split("  prune_old_releases:\n", 1)[1]

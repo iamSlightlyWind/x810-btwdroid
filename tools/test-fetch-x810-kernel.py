@@ -20,6 +20,15 @@ SPEC.loader.exec_module(fetcher)
 
 
 class KernelReceiptTests(unittest.TestCase):
+    def test_github_api_requests_use_workflow_token_without_exposing_it_in_release_urls(self):
+        with patch.dict(fetcher.os.environ, {"GH_TOKEN": "workflow-secret"}, clear=True):
+            headers = fetcher.github_api_headers()
+        self.assertEqual(headers["Authorization"], "Bearer workflow-secret")
+        self.assertIn("X-GitHub-Api-Version", headers)
+        self.assertNotIn("Authorization", {
+            "User-Agent": fetcher.USER_AGENT,
+        })
+
     def test_latest_kernel_identity_is_metadata_only_and_carries_all_boot_hashes(self):
         release = {"tag_name": "x810-fedora-port-build-42"}
         manifest = {"source_commit": "a" * 40}
