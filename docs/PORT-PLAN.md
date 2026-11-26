@@ -14,9 +14,12 @@ workflow uses the shared multi-stage graph: `publication_identity`,
 runs the contract tests, builds Arch packages, and hands off `update.zip`.
 Independently, the rootfs job builds its own package copies and consumes the
 separately verified X810 kernel-module artifact; it does not wait for the
-updater job. Arch uses the existing X810 kernel release rather than building
-a kernel. Because Arch repositories roll, every rootfs is freshly built rather
-than reused from a source-only fingerprint.
+updater job. Arch consumes the published X810 kernel release rather than
+building its own kernel. The planner verifies that a reusable Arch release
+still matches the latest upstream kernel RPM and all four boot-image hashes;
+a kernel release change forces a new Arch release. Because Arch repositories
+roll, every rootfs is freshly built rather than reused from a source-only
+fingerprint.
 
 GitHub Actions uses separate restore/save caches:
 the signed bootstrap is keyed by `ALARM-ROOTFS.lock`, builder package archives

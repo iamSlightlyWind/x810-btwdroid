@@ -20,6 +20,26 @@ SPEC.loader.exec_module(fetcher)
 
 
 class KernelReceiptTests(unittest.TestCase):
+    def test_latest_kernel_identity_is_metadata_only_and_carries_all_boot_hashes(self):
+        release = {"tag_name": "x810-fedora-port-build-42"}
+        manifest = {"source_commit": "a" * 40}
+        rpm = {"sha256": "b" * 64, "size_bytes": 1234}
+        boot = {
+            name: {"sha256": hashlib.sha256(name.encode()).hexdigest(), "size_bytes": size}
+            for name, size in fetcher.BOOT_IMAGE_SIZES.items()
+        }
+        with patch.object(fetcher, "fetch_json", return_value=release), \
+                patch.object(fetcher, "release_kernel_asset", return_value=(rpm, manifest)), \
+                patch.object(fetcher, "release_boot_assets", return_value=boot):
+            identity = fetcher.latest_kernel_identity()
+        self.assertEqual(identity["release_tag"], release["tag_name"])
+        self.assertEqual(identity["source_commit"], manifest["source_commit"])
+        self.assertEqual(identity["kernel_rpm"], {"sha256": rpm["sha256"], "size_bytes": rpm["size_bytes"]})
+        self.assertEqual(identity["boot_images"], {
+            name: {"sha256": record["sha256"], "size_bytes": record["size_bytes"]}
+            for name, record in boot.items()
+        })
+
     def test_receipt_records_release_rpm_and_exact_module_tree(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

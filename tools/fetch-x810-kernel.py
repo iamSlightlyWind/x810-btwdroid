@@ -245,6 +245,29 @@ def release_boot_assets(release: dict[str, Any], manifest: dict[str, Any]) -> di
     return result
 
 
+def latest_kernel_identity(opener=urllib.request.urlopen) -> dict[str, Any]:
+    """Return verified upstream kernel provenance without downloading the RPM/images."""
+    release = fetch_json(RELEASE_API, opener=opener)
+    asset, manifest = release_kernel_asset(release, opener=opener)
+    boot_assets = release_boot_assets(release, manifest)
+    source_commit = manifest.get("source_commit")
+    release_tag = release.get("tag_name")
+    if (not isinstance(source_commit, str) or not re.fullmatch(r"[0-9a-f]{40,64}", source_commit)
+            or not isinstance(release_tag, str) or not release_tag):
+        raise RuntimeError("latest X810 kernel release has invalid provenance")
+    return {
+        "repository": REPOSITORY,
+        "release_tag": release_tag,
+        "source_commit": source_commit,
+        "kernel_release": KERNEL_RELEASE,
+        "kernel_rpm": {"sha256": asset["sha256"], "size_bytes": asset["size_bytes"]},
+        "boot_images": {
+            name: {"sha256": record["sha256"], "size_bytes": record["size_bytes"]}
+            for name, record in boot_assets.items()
+        },
+    }
+
+
 def download_asset(asset: dict[str, Any], destination: Path, opener=urllib.request.urlopen) -> None:
     destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if destination.is_symlink():
@@ -335,6 +358,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--receipt", type=Path, default=cache / "kernel.json")
     parser.add_argument("--verify-prepared", action="store_true",
                         help="verify the cached receipt and module tree without network access")
+    parser.add_argument("--identity-only", action="store_true",
+                        help="print verified latest upstream kernel identity without downloading large assets")
     args = parser.parse_args(argv)
     try:
         if args.verify_prepared:
@@ -342,6 +367,9 @@ def main(argv: list[str] | None = None) -> int:
                 args.receipt, cache / "usr/lib/modules" / KERNEL_RELEASE,
             )
             print(f"Verified prepared X810 kernel modules from {receipt['release_tag']}.")
+            return 0
+        if args.identity_only:
+            print(json.dumps(latest_kernel_identity(), sort_keys=True))
             return 0
         release = fetch_json(RELEASE_API)
         asset, manifest = release_kernel_asset(release)
